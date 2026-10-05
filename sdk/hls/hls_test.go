@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// fixtureServer serves engine/hls/testdata over HTTP so tests never touch the
+// fixtureServer serves sdk/hls/testdata over HTTP so tests never touch the
 // real network. Returns the server (caller closes) and its base URL.
 func fixtureServer(t *testing.T) *httptest.Server {
 	t.Helper()

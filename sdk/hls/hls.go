@@ -252,7 +252,7 @@ func (m *Master) VideoHeights() []int {
 // ─── Media playlist ───────────────────────────────────────────────────────────
 
 // EncryptionInfo holds the HLS EXT-X-KEY attributes needed to acquire a
-// decryption key.  The key material itself lives only in engine/fairplay.
+// decryption key.  The key material itself lives only in sdk/fairplay.
 type EncryptionInfo struct {
 	// URIPrefix is the Apple license endpoint prefix (before the comma in the
 	// EXT-X-KEY URI field).
@@ -496,7 +496,7 @@ func logMediaParsed(rawURL string, med *Media, pl *m3u8.MediaPlaylist) {
 
 // byteRangeURL appends a "#bytes=<offset>-<end>" fragment to url when the
 // segment declares an EXT-X-BYTERANGE (Limit > 0). The segment downloader in
-// utils/aacstream detects this fragment and issues a Range request instead of a
+// sdk/aacstream detects this fragment and issues a Range request instead of a
 // full GET, so byte-range playlists (like Apple Music AAC) start at the
 // correct position instead of always downloading from byte 0.
 func byteRangeURL(rawURL string, offset, length int64) string {

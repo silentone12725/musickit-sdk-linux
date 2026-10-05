@@ -23,11 +23,17 @@
         "operationId": "getStatus",
         "responses": {
           "200": {
-            "description": "Engine is running",
+            "description": "Healthy",
             "content": {
               "application/json": {
-                "example": {
-                  "status": "ok"
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    }
+                  }
                 }
               }
             }
@@ -44,17 +50,48 @@
         "operationId": "getCapabilities",
         "responses": {
           "200": {
-            "description": "Current feature support",
+            "description": "Feature flags",
             "content": {
               "application/json": {
-                "example": {
-                  "lossless": true,
-                  "hiRes": true,
-                  "musicVideo": true,
-                  "downloads": true,
-                  "lyrics": true,
-                  "queue": false,
-                  "radio": false
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lossless": {
+                      "type": "boolean"
+                    },
+                    "hiRes": {
+                      "type": "boolean"
+                    },
+                    "atmos": {
+                      "type": "boolean"
+                    },
+                    "musicVideo": {
+                      "type": "boolean"
+                    },
+                    "downloads": {
+                      "type": "boolean"
+                    },
+                    "lyrics": {
+                      "type": "boolean"
+                    },
+                    "drm": {
+                      "type": "object",
+                      "properties": {
+                        "process": {
+                          "type": "string"
+                        },
+                        "fairplay": {
+                          "type": "string"
+                        },
+                        "session": {
+                          "type": "string"
+                        },
+                        "cbcs": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -123,6 +160,9 @@
           },
           "502": {
             "description": "Apple Music API error"
+          },
+          "503": {
+            "description": "Apple servers unreachable (circuit open)"
           }
         },
         "tags": [
@@ -295,7 +335,8 @@
             "schema": {
               "type": "integer",
               "default": 500
-            }
+            },
+            "description": "Square size in pixels; clamped to 50-3000 (default 500)"
           }
         ],
         "responses": {
@@ -308,6 +349,12 @@
           },
           "404": {
             "description": "Asset not found"
+          },
+          "400": {
+            "description": "Invalid id or storefront"
+          },
+          "502": {
+            "description": "Artwork fetch failed"
           }
         },
         "tags": [
@@ -714,14 +761,30 @@
           "System"
         ],
         "summary": "Helper tools found",
-        "description": "Reports which optional tools (ffmpeg, MP4Box, VLC) the engine located.",
+        "description": "Reports whether ffmpeg was found on PATH, with its path and version.",
         "responses": {
           "200": {
             "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "ffmpeg": {
+                      "type": "object",
+                      "properties": {
+                        "available": {
+                          "type": "boolean"
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -758,11 +821,37 @@
         "summary": "Runtime statistics",
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Runtime stats",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "goroutines": {
+                      "type": "integer"
+                    },
+                    "heapAllocBytes": {
+                      "type": "integer"
+                    },
+                    "heapSysBytes": {
+                      "type": "integer"
+                    },
+                    "stackSysBytes": {
+                      "type": "integer"
+                    },
+                    "totalAllocBytes": {
+                      "type": "integer"
+                    },
+                    "numGC": {
+                      "type": "integer"
+                    },
+                    "gcPauseTotalNs": {
+                      "type": "integer"
+                    },
+                    "nextGCBytes": {
+                      "type": "integer"
+                    }
+                  }
                 }
               }
             }
@@ -880,7 +969,14 @@
         },
         "responses": {
           "202": {
-            "description": "Login started"
+            "description": "Login started; current DRM snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DRMStatus"
+                }
+              }
+            }
           },
           "400": {
             "description": "Error (plain-text body)"
@@ -909,10 +1005,23 @@
         },
         "responses": {
           "200": {
-            "description": "Accepted"
+            "description": "Accepted; current DRM snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DRMStatus"
+                }
+              }
+            }
           },
           "400": {
             "description": "Error (plain-text body)"
+          },
+          "409": {
+            "description": "No challenge pending or reply rejected"
+          },
+          "503": {
+            "description": "DRM backend unavailable"
           }
         }
       }
@@ -925,7 +1034,20 @@
         "summary": "Sign out",
         "responses": {
           "200": {
-            "description": "Signed out"
+            "description": "Signed out; current DRM snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DRMStatus"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "DRM backend unavailable"
           }
         }
       }
@@ -938,7 +1060,13 @@
         "summary": "Drop the stored session",
         "responses": {
           "204": {
-            "description": "No content"
+            "description": "Session cleared"
+          },
+          "500": {
+            "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "DRM backend unavailable"
           }
         }
       }
@@ -1273,10 +1401,12 @@
           {
             "name": "t",
             "in": "query",
+            "required": true,
+            "description": "Target time in seconds (>= 0)",
             "schema": {
-              "type": "number"
-            },
-            "description": "Target time in seconds"
+              "type": "number",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -1299,6 +1429,9 @@
             }
           },
           "404": {
+            "description": "Error (plain-text body)"
+          },
+          "400": {
             "description": "Error (plain-text body)"
           }
         }
@@ -1349,11 +1482,12 @@
         ],
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Job snapshot",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "additionalProperties": true
                 }
               }
             }
@@ -1411,23 +1545,38 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "description": "Optional developer JWT (a leading 'Bearer ' is accepted); the engine's cached token is used when absent",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Analysis",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/AudioAnalysis"
                 }
               }
             }
           },
-          "404": {
+          "204": {
+            "description": "Apple returned no analysis for this track (not an error)"
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "502": {
             "description": "Error (plain-text body)"
           }
-        }
+        },
+        "description": "Cross-fade timing data from Apple Music's audio-analysis relationship. Cacheable for a day."
       }
     },
     "/api/v1/catalog/albums/{id}": {
@@ -2022,10 +2171,17 @@
           "400": {
             "description": "Error (plain-text body)"
           },
+          "404": {
+            "description": "Session not found or expired"
+          },
+          "500": {
+            "description": "Error (plain-text body)"
+          },
           "503": {
-            "description": "libvlc unavailable"
+            "description": "libvlc not available"
           }
-        }
+        },
+        "description": "Plays the session in-process. Uses the committed or in-progress disk cache when available, otherwise the session's /audio URL. A positive startMs seeks once playback starts."
       }
     },
     "/api/v1/vlc/pause": {
@@ -2037,6 +2193,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "503": {
+            "description": "libvlc not available"
           }
         }
       }
@@ -2050,6 +2209,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "503": {
+            "description": "libvlc not available"
           }
         }
       }
@@ -2063,6 +2225,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "503": {
+            "description": "libvlc not available"
           }
         }
       }
@@ -2085,10 +2250,26 @@
         },
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "actualStartMs": {
+                      "type": "integer",
+                      "format": "int64"
+                    }
+                  }
+                }
+              }
+            }
           },
           "400": {
             "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "libvlc not available"
           }
         }
       }
@@ -2115,6 +2296,9 @@
           },
           "400": {
             "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "libvlc not available"
           }
         }
       }
@@ -2127,14 +2311,17 @@
         "summary": "Current position and state",
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Position and state",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/VLCTime"
                 }
               }
             }
+          },
+          "503": {
+            "description": "libvlc not available"
           }
         }
       }
@@ -2838,6 +3025,73 @@
         "properties": {
           "priority": {
             "type": "integer"
+          }
+        }
+      },
+      "AudioAnalysis": {
+        "type": "object",
+        "description": "Cross-fade timing (milliseconds from track start) and loudness data",
+        "properties": {
+          "assetId": {
+            "type": "string"
+          },
+          "fadeIn": {
+            "type": "object",
+            "properties": {
+              "startMs": {
+                "type": "integer"
+              },
+              "endMs": {
+                "type": "integer"
+              }
+            }
+          },
+          "fadeOut": {
+            "type": "object",
+            "properties": {
+              "startMs": {
+                "type": "integer"
+              },
+              "endMs": {
+                "type": "integer"
+              }
+            }
+          },
+          "bpm": {
+            "type": "number"
+          },
+          "key": {
+            "type": "string"
+          },
+          "loudness": {
+            "type": "object",
+            "properties": {
+              "beginning": {
+                "type": "number"
+              },
+              "main": {
+                "type": "number"
+              },
+              "ending": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "VLCTime": {
+        "type": "object",
+        "properties": {
+          "posMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lengthMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "type": "string"
           }
         }
       }

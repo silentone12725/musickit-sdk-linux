@@ -7,8 +7,8 @@
 //     bytes; they enter fairplayDecryptor and never leave it.
 //
 //  2. HLSSource — builds a pipeline.Source that downloads HLS segments.
-//     This function lives here rather than in engine/hls because
-//     utils/aacstream is the authorised segment downloader and, outside main,
+//     This function lives here rather than in sdk/hls because
+//     sdk/aacstream is the authorised segment downloader and, outside main,
 //     this is the only engine package permitted to import it (see archtest).
 //
 // Trust boundary: key bytes enter the unexported fairplayDecryptor struct via
@@ -51,7 +51,7 @@ type LicenseProvider interface {
 	Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error)
 }
 
-// New returns the default LicenseProvider backed by utils/aacstream.
+// New returns the default LicenseProvider backed by sdk/aacstream.
 func New() LicenseProvider { return &fpLicenseProvider{} }
 
 type fpLicenseProvider struct{}
@@ -109,12 +109,12 @@ func shouldEvictKey(ctx context.Context, err error) bool {
 // ── HLS segment source ────────────────────────────────────────────────────────
 
 // HLSSource returns a pipeline.Source that downloads and concatenates HLS
-// segments using the parallel downloader from utils/aacstream.
+// segments using the parallel downloader from sdk/aacstream.
 //
 // urls must be [initURL, seg0, seg1, …] as returned by hls.Media.AllURLs().
 //
-// HLSSource lives in this package rather than engine/hls because
-// utils/aacstream may only be imported here (and by main). The function is
+// HLSSource lives in this package rather than sdk/hls because
+// sdk/aacstream may only be imported here (and by main). The function is
 // otherwise a pure transport concern with no DRM knowledge.
 func HLSSource(urls []string) pipeline.Source { return &hlsSource{urls: urls} }
 

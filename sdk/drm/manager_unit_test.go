@@ -3,8 +3,8 @@
 // These tests do NOT require the mock wrapper binary — all backend behaviour
 // is emulated via the mockBackend type. Run with:
 //
-//	go test -race ./engine/drm/
-//	go test -v -run TestManager ./engine/drm/
+//	go test -race ./drm/
+//	go test -v -run TestManager ./drm/
 package drm_test
 
 import (

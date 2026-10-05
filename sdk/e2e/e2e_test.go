@@ -6,7 +6,7 @@
 // provider field is unexported, so a fake provider cannot be injected into the
 // real Manager from outside package playback without a production seam (which
 // the frozen-architecture rule forbids). The Manager's own bookkeeping is
-// covered white-box in engine/playback. Here we drive the identical downstream
+// covered white-box in sdk/playback. Here we drive the identical downstream
 // path the Manager uses — Provider.Open → Track.Open → pipeline.Run — directly.
 package e2e
 

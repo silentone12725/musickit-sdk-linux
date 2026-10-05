@@ -183,8 +183,8 @@ func (dc *drmConn) close() {
 // FairPlay decryption connection. In production DRMManager implements this,
 // delegating to NativeBackend.DialCBCS which returns an in-process net.Pipe().
 //
-// Defined here (not in engine/drm) so that engine/fairplay does not import
-// engine/drm, preserving the one-way dependency: drm → fairplay is forbidden.
+// Defined here (not in sdk/drm) so that sdk/fairplay does not import
+// sdk/drm, preserving the one-way dependency: drm → fairplay is forbidden.
 type CBCSDialer interface {
 	// DialCBCS opens one decryption session. The caller owns the connection
 	// and speaks the runv2 FairPlay wire protocol (sendString + DecryptFragment).

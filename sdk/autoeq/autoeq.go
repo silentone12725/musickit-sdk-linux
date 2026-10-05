@@ -39,7 +39,7 @@ type Band struct {
 	Enabled bool    `json:"enabled"` // false = skip this band
 }
 
-// Settings is the stored EQ configuration (at ~/.config/aml/eq.json).
+// Settings is the stored EQ configuration (at ~/.config/musickit-sdk-linux/eq.json).
 type Settings struct {
 	Preamp float64 `json:"preamp"` // preamp gain in dB (already negative for AutoEQ files)
 	Bands  []Band  `json:"bands"`
@@ -60,28 +60,28 @@ var preampRe = regexp.MustCompile(`(?i)Preamp:\s*(-?[\d.]+)\s*dB`)
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
-// configDir returns ~/.config/aml, creating it if needed.
+// configDir returns ~/.config/musickit-sdk-linux, creating it if needed.
 func configDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	d := filepath.Join(home, ".config", "aml")
+	d := filepath.Join(home, ".config", "musickit-sdk-linux")
 	return d, os.MkdirAll(d, 0o755)
 }
 
-// cacheDir returns ~/.cache/aml/autoeq, creating it if needed.
+// cacheDir returns ~/.cache/musickit-sdk-linux/autoeq, creating it if needed.
 func cacheDir() (string, error) {
 	base, err := os.UserCacheDir()
 	if err != nil {
 		base, _ = os.UserHomeDir()
 		base = filepath.Join(base, ".cache")
 	}
-	d := filepath.Join(base, "aml", "autoeq")
+	d := filepath.Join(base, "musickit-sdk-linux", "autoeq")
 	return d, os.MkdirAll(d, 0o755)
 }
 
-// LoadSettings reads the current EQ settings from ~/.config/aml/eq.json.
+// LoadSettings reads the current EQ settings from ~/.config/musickit-sdk-linux/eq.json.
 // Returns an empty Settings (no error) if the file does not exist.
 func LoadSettings() (*Settings, error) {
 	dir, err := configDir()
@@ -102,7 +102,7 @@ func LoadSettings() (*Settings, error) {
 	return &s, nil
 }
 
-// SaveSettings writes s to ~/.config/aml/eq.json.
+// SaveSettings writes s to ~/.config/musickit-sdk-linux/eq.json.
 func SaveSettings(s *Settings) error {
 	dir, err := configDir()
 	if err != nil {
@@ -177,7 +177,7 @@ type targetRaw struct {
 }
 
 // FetchTargets fetches the list of available target curves from autoeq.app/targets.
-// Results are cached at ~/.cache/aml/autoeq/targets.json for 24 hours.
+// Results are cached at ~/.cache/musickit-sdk-linux/autoeq/targets.json for 24 hours.
 func FetchTargets(ctx context.Context) ([]TargetEntry, error) {
 	dir, err := cacheDir()
 	if err != nil {
@@ -231,7 +231,7 @@ func FetchTargets(ctx context.Context) ([]TargetEntry, error) {
 }
 
 // FetchIndex fetches the AutoEQ headphone model list from autoeq.app/entries.
-// Results are cached at ~/.cache/aml/autoeq/index.json for 24 hours.
+// Results are cached at ~/.cache/musickit-sdk-linux/autoeq/index.json for 24 hours.
 func FetchIndex(ctx context.Context) ([]Model, error) {
 	dir, err := cacheDir()
 	if err != nil {
@@ -309,7 +309,7 @@ var apiTypeMap = map[string]string{
 }
 
 // FetchBands fetches optimized parametric EQ bands for the given model from the
-// autoeq.app /equalize API. Results are cached at ~/.cache/aml/autoeq/<slug>_bands.json.
+// autoeq.app /equalize API. Results are cached at ~/.cache/musickit-sdk-linux/autoeq/<slug>_bands.json.
 // If target is empty or incompatible, DefaultTarget(form) is used automatically.
 func FetchBands(ctx context.Context, source, form, name, rig, target string) (*Settings, error) {
 	dir, err := cacheDir()
@@ -544,7 +544,7 @@ func DefaultTarget(form string) string {
 // FetchFR fetches raw and equalized frequency-response data for the given model
 // from the autoeq.app /equalize API. Returns FRData with Original (smoothed) and
 // Corrected (equalized_smoothed) curves.
-// Results are cached at ~/.cache/aml/autoeq/<slug>_<targslug>_fr.json.
+// Results are cached at ~/.cache/musickit-sdk-linux/autoeq/<slug>_<targslug>_fr.json.
 // If target is empty or incompatible, DefaultTarget(form) is used automatically.
 func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRData, error) {
 	dir, err := cacheDir()

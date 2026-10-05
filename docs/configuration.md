@@ -43,7 +43,7 @@ The remaining keys (folder templates, tagging, conversion, lyrics format) apply 
 | `<drm dir>/files/engine-session.lock` | Single-instance lock |
 | `~/.cache/musickit-sdk-linux/playback/` | Cached lossless tracks (`{assetId}-alac.m4a`) |
 | `~/.cache/musickit-sdk-linux/library.enc`, `library.key` | Encrypted library cache and its key |
-| `~/.cache/engine/segments` | AAC segment cache |
+| `~/.cache/musickit-sdk-linux/segments` | AAC segment cache |
 | `~/.config/musickit-sdk-linux/drm/` | Optional per-user DRM directory (searched for `lib64` and `q.so`) |
 
 Clear caches with `DELETE /api/v1/cache/playback?what=persistent|prewarm|segments`.

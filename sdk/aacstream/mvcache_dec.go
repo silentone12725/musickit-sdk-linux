@@ -3,13 +3,13 @@ package aacstream
 // mvcache_dec.go — per-track decrypted MP4 cache with per-user encryption.
 //
 // On first play the full transcoded (decrypted + FFmpeg-remuxed) video is
-// written to ~/.cache/aml/engine/mv-dec/<assetID>.enc while simultaneously
+// written to ~/.cache/musickit-sdk-linux/mv-dec/<assetID>.enc while simultaneously
 // streaming to the HTTP response.  On subsequent plays the cached file is
 // decrypted on-the-fly via AES-256-CTR and served directly, skipping the
 // entire download → Apple-DRM-decrypt → FFmpeg pipeline.
 //
 // Encryption key: a random 256-bit value generated once and stored at
-// ~/.config/aml/mv-dec.key (mode 0600).  Only the owning Linux user can read
+// ~/.config/musickit-sdk-linux/mv-dec.key (mode 0600).  Only the owning Linux user can read
 // it; other users on the same machine cannot decrypt the cache.  Reading the
 // 32-byte file costs a single syscall (~microseconds); no KDF iterations.
 // If the key file cannot be persisted, dec-caching is disabled for that run
@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	mvDecDirName = "engine/mv-dec"
-	mvDecKeyFile = "aml/mv-dec.key" // relative to os.UserConfigDir(); mode 0600
+	mvDecDirName = "musickit-sdk-linux/mv-dec"
+	mvDecKeyFile = "musickit-sdk-linux/mv-dec.key" // relative to os.UserConfigDir(); mode 0600
 	mvDecIVSize  = 16
 )
 
@@ -71,7 +71,7 @@ func init() {
 
 // initMVDecKey loads (or generates) the per-user AES-256 key.
 //
-// The key lives at ~/.config/aml/mv-dec.key (mode 0600).  On first call it is
+// The key lives at ~/.config/musickit-sdk-linux/mv-dec.key (mode 0600).  On first call it is
 // generated from crypto/rand and written; on subsequent calls it is read back.
 // Reading 32 bytes from a local file takes microseconds — no KDF iterations needed.
 // File permissions prevent other Linux users from reading the key.

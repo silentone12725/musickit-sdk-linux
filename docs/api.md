@@ -14,11 +14,11 @@ Conventions:
 | Method | Path | Description | Stability |
 |---|---|---|---|
 | GET | `/status` | Health check | stable |
-| GET | `/capabilities` | Feature flags: lossless, Atmos, CBCS, VLC availability | stable |
+| GET | `/capabilities` | Feature flags: `lossless`, `hiRes`, `atmos`, `musicVideo`, `downloads`, `lyrics`, plus a `drm` object (`process`, `fairplay`, `session`, `cbcs`) | stable |
 | GET | `/events` | Server-Sent Events channel (see below) | stable |
-| GET | `/tools` | Which helper tools (ffmpeg, MP4Box, VLC) were found | evolving |
+| GET | `/tools` | `{"ffmpeg": {"available", "path", "version"}}`: whether ffmpeg was found on `PATH` | evolving |
 | GET | `/metrics` | Internal latency and cache metrics | evolving |
-| GET | `/debug/runtime` | Runtime stats | evolving |
+| GET | `/debug/runtime` | Go runtime stats: goroutines, heap, stack, total alloc, GC count and pause, next GC | evolving |
 | GET | `/debug/pprof/*` | Go pprof; only registered when `MUSICKIT_DEBUG=1` (heap dumps can contain key material) | debug |
 
 ### Events (SSE)
@@ -30,25 +30,25 @@ Conventions:
 | Method | Path | Body | Description |
 |---|---|---|---|
 | GET | `/drm/status` | — | DRM snapshot (process, manager, authentication, FairPlay, session, recovery state), selected backend, session age and TTL |
-| POST | `/drm/authenticate` | `{"email","password"}` | Start a login (max 4 KB). `503` when the DRM backend is unavailable |
-| POST | `/drm/challenge` | `{"reply"}` | Answer a pending 2FA challenge |
-| POST | `/drm/logout` | — | Sign out |
-| DELETE | `/drm/session` | — | Drop the stored session |
+| POST | `/drm/authenticate` | `{"email","password"}` | Start a login (max 4 KB). `202` with the DRM snapshot; `503` when the DRM backend is unavailable |
+| POST | `/drm/challenge` | `{"reply"}` | Answer a pending 2FA challenge. `200` with the DRM snapshot; `409` if no challenge is pending or the reply is rejected |
+| POST | `/drm/logout` | — | Sign out; `200` with the DRM snapshot |
+| DELETE | `/drm/session` | — | Drop the stored session; `204` |
 
 ## Playback
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/playback` | Create a session. Body below. Returns session metadata (codec, sample rate, bit depth, duration, artwork URL, `expiresIn`) |
+| POST | `/playback` | Create a session. Body below. `201` with session metadata (codec, sample rate, bit depth, duration, artwork URL, `expiresIn`); `401` without tokens; `503` when Apple's servers are unreachable (circuit open) |
 | GET | `/playback/{id}/audio` | Stream audio (ALAC/AAC/Atmos). Supports `Range`; ALAC is served from the disk cache |
 | GET | `/playback/{id}/video` | Music video stream |
 | GET | `/playback/{id}/video-es`, `video-raw`, `video-dl`, `video-dl-info` | Alternative music-video delivery modes (evolving) |
-| GET | `/playback/{id}/vseg/manifest`, `init`, `seg/{n}`, `seek` | Segmented video for MSE players (evolving) |
+| GET | `/playback/{id}/vseg/manifest`, `init`, `seg/{n}`, `seek?t=<seconds>` | Segmented video for MSE players (evolving). `seek` requires `t` ≥ 0 and returns `{n, t}` |
 | DELETE | `/playback/{id}/vseg` | Stop a segmented-video producer |
 | POST | `/playback/{id}/precache` | Warm a session's audio into the cache |
 | DELETE | `/playback/{id}` | Release a session |
 | PUT | `/playback/context` | Tell the engine the current queue so the prefetcher can warm upcoming tracks. Returns `202 {"jobId"}` |
-| GET / DELETE | `/jobs/{id}` | Inspect or cancel a cache-warm job |
+| GET / DELETE | `/jobs/{id}` | Inspect (job snapshot) or cancel (`204`) a cache-warm job |
 
 `POST /playback` body:
 
@@ -78,24 +78,24 @@ Conventions:
 
 ## In-process player (libvlc)
 
-Routes are no-ops when libvlc is not installed (check `/capabilities`).
+When libvlc is not installed these routes return `503 libvlc not available` (there is no capability flag for it; treat that `503` as "use the HTTP audio stream instead").
 
 | Method | Path | Body |
 |---|---|---|
-| POST | `/vlc/load` | `{"sessionId","assetId","startMs"}` |
+| POST | `/vlc/load` | `{"sessionId","startMs"}`; `404` if the session is unknown. Plays from the disk cache when available, otherwise from the session's `/audio` URL |
 | POST | `/vlc/pause`, `/vlc/resume`, `/vlc/stop` | — |
-| POST | `/vlc/seek` | `{"posMs","sessionId"}` |
+| POST | `/vlc/seek` | `{"posMs","sessionId"}` → `{"actualStartMs"}` |
 | POST | `/vlc/volume` | `{"volume": 0-100}` |
-| GET | `/vlc/time` | position / state |
+| GET | `/vlc/time` | `{"posMs","lengthMs","state"}` |
 
 ## Metadata, artwork, lyrics
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/metadata/{id}?sf=` | Track info and available qualities (`StreamInfo`: codec, sampleRate, bitDepth, bitrate) |
-| GET | `/artwork/{id}` | Proxy an artwork image from Apple's CDN |
-| GET | `/lyrics/{id}` | Lyrics (word-by-word, translation, pronunciation where available) |
-| GET | `/audioanalysis/{id}` | Audio analysis data |
+| GET | `/artwork/{id}?sf=&size=` | Proxy an artwork image from Apple's CDN. `size` is clamped to 50-3000 (default 500) |
+| GET | `/lyrics/{id}?sf=&format=&type=` | Lyrics. `format`: `lrc` (default), `ttml` or `vtt`; `type`: `lyrics` (default) or `syllable-lyrics`. The response is text (`application/xml` for ttml, `text/vtt`, otherwise `text/plain`); `404` when unavailable |
+| GET | `/audioanalysis/{id}?sf=&token=` | Cross-fade timing and loudness: `{assetId, fadeIn, fadeOut, bpm, key, loudness}` (times in ms). `204` when Apple has no analysis for the track; `token` optionally overrides the developer JWT |
 
 ## Catalog
 

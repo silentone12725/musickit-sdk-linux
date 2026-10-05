@@ -30,8 +30,8 @@ const (
 	// DefaultMVCacheMaxBytes is the default maximum on-disk cache size for MV video segments (2 GiB).
 	DefaultMVCacheMaxBytes int64 = 2 * 1024 * 1024 * 1024
 
-	cacheDirName   = "engine/segments"
-	mvCacheDirName = "engine/mv-segments"
+	cacheDirName   = "musickit-sdk-linux/segments"
+	mvCacheDirName = "musickit-sdk-linux/mv-segments"
 )
 
 // segmentCache is the global LRU cache for audio HLS segments.

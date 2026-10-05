@@ -84,8 +84,8 @@ NATIVE_OBJS = $(NATIVE_C_OBJS) $(NATIVE_CXX_OBJS)
 NATIVE_HEADERS = $(wildcard $(NATIVE_DIR)/*.h)
 
 $(NATIVE_DIR)/hybris_stubs.o: $(NATIVE_DIR)/hybris_stubs.c $(NATIVE_HEADERS)
-	$(CC) $(NATIVE_CFLAGS) -Dandroid_dlopen=aml_android_dlopen -Dandroid_dlsym=aml_android_dlsym \
-	      -Dandroid_dlerror=aml_android_dlerror -c -o $@ $<
+	$(CC) $(NATIVE_CFLAGS) -Dandroid_dlopen=mk_android_dlopen -Dandroid_dlsym=mk_android_dlsym \
+	      -Dandroid_dlerror=mk_android_dlerror -c -o $@ $<
 
 $(NATIVE_DIR)/%.o: $(NATIVE_DIR)/%.c $(NATIVE_HEADERS)
 	$(CC) $(NATIVE_CFLAGS) -c -o $@ $<

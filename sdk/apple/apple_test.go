@@ -12,7 +12,7 @@ import (
 // apple.com URLs with no injection point, so they cannot be redirected to a
 // test server without modifying production code. Per the frozen-architecture
 // rule we do not add injection seams; those paths are covered indirectly by the
-// engine/playback and engine/e2e tests via a fake media.Provider.
+// sdk/playback and sdk/e2e tests via a fake media.Provider.
 //
 // The testdata/webplayback_response.json fixture documents the exact JSON shape
 // webplaybackURL parses; the parsing logic itself is exercised below through a

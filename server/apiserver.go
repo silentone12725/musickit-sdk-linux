@@ -818,7 +818,7 @@ func (s *APIServer) Start() error {
 
 	// TLS listener on the configured port (primary API endpoint).
 	// All internal engine communication is encrypted via TLS on localhost.
-	// Electron trusts this loopback cert via session.setCertificateVerifyProc.
+	// Frontends must trust this loopback cert (e.g. Electron via session.setCertificateVerifyProc).
 	tlsCfg, err := loopbackTLSConfig()
 	if err != nil {
 		slog.Error("loopback TLS setup failed", "err", err)
@@ -867,7 +867,7 @@ func (s *APIServer) Stop() {
 // a fixed port, so it rejects any request a foreign web page could forge:
 // a non-loopback Host (DNS rebinding) or a browser Origin outside the
 // allowlist (cross-site "simple" POSTs skip CORS preflight entirely).
-// Media elements and the Electron main process send no Origin and pass.
+// Media elements and native/Electron main processes send no Origin and pass.
 func corsPreflightHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopbackHost(r.Host) {

@@ -236,7 +236,7 @@ func audioFormatFields(codec pipeline.Codec, sampleRate int) (bitRate, channelCo
 
 func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) (*media.Session, error) {
 	if req.MVMaxHeight == 0 {
-		req.MVMaxHeight = 1080 // default: 1080p H.264 (safe for Linux/Electron)
+		req.MVMaxHeight = 1080 // default: 1080p H.264 (safe for Linux browsers and Electron)
 	}
 	if len(req.MVAudioPriorities) == 0 {
 		req.MVAudioPriorities = []string{"audio-atmos", "audio-ac3", "audio-stereo-256"}

@@ -1,7 +1,7 @@
 // Package mvlabel holds the most recently selected MV video quality label
 // (e.g. "1920x1080"). It is a shared data cell with no other dependencies
-// so that engine/core/apple can write it and engine (main) can read it
-// without engine/core/apple needing to import engine/utils/aacstream.
+// so that sdk/apple can write it and the server can read it
+// without sdk/apple needing to import engine/sdk/aacstream.
 package mvlabel
 
 import "sync"

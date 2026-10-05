@@ -18,7 +18,7 @@ import (
 // by the engine process. The wrapper subprocess still opens mpl_db as before;
 // the lock only prevents a second engine from also managing the same session.
 //
-// Linux/Unix (flock); the engine is Linux-only (see engine/drm/embedded.go).
+// Linux/Unix (flock); the engine is Linux-only (see sdk/drm).
 type SessionLock struct {
 	f    *os.File
 	path string
