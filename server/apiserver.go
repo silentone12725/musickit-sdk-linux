@@ -304,10 +304,16 @@ func (b *eventBus) emit(typ string, data any) {
 	if b.ringLen < ringSize {
 		b.ringLen++
 	}
-	for _, ch := range b.clients {
+	for id, ch := range b.clients {
 		select {
 		case ch <- ev:
-		default: // slow consumer: drop rather than block
+		default:
+			// A consumer that can't keep up must not stall the bus, and silently dropping
+			// events would leave it believing a stale state is current. Disconnect it: the
+			// handler sees the closed channel, tells the client, and the client reconnects
+			// with Last-Event-ID — getting a replay, or a replay.truncated resync signal.
+			close(ch)
+			delete(b.clients, id)
 		}
 	}
 	b.mu.Unlock()
@@ -347,7 +353,11 @@ func (b *eventBus) subscribeAndReplay(afterID int64) (subID string, ch <-chan ss
 	c := make(chan sseEvent, 64) // larger buffer absorbs events emitted during replay write
 	b.clients[id] = c
 
-	if afterID >= 0 && b.ringLen > 0 {
+	if afterID > b.seq {
+		// The client has seen events this bus never issued: the engine restarted and its
+		// IDs started over. Nothing it remembers applies; make it resync.
+		truncated = true
+	} else if afterID >= 0 && b.ringLen > 0 {
 		oldestSlot := b.ringPos - b.ringLen
 		oldestID := b.ring[oldestSlot&ringMask].ID
 		if afterID < oldestID-1 {
@@ -474,6 +484,7 @@ type ServerConfig struct {
 
 // NewAPIServer wires all routes.
 func NewAPIServer(port int, cfg ServerConfig) *APIServer {
+	initMVPrefs()
 	epoch := newEpochManager()
 	shutCtx, shutStop := context.WithCancel(context.Background())
 	s := &APIServer{
@@ -641,7 +652,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
-	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10})
+	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10, OutputRoots: exportRoots()})
 
 	mux := http.NewServeMux()
 
@@ -1030,4 +1041,17 @@ func randID() string {
 	b := make([]byte, 8)
 	rand.Read(b) //nolint:errcheck
 	return hex.EncodeToString(b)
+}
+
+// exportRoots returns the directories exports may write into. The request body that names
+// the output directory comes from a web page, so by default it is confined to the user's
+// home; MUSICKIT_EXPORT_ROOTS (a colon-separated list) replaces that.
+func exportRoots() []string {
+	if v := os.Getenv("MUSICKIT_EXPORT_ROOTS"); v != "" {
+		return filepath.SplitList(v)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return []string{home}
+	}
+	return []string{"/nonexistent"} // no home to anchor to: refuse rather than allow everything
 }
