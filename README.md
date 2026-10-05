@@ -22,6 +22,16 @@ A local engine and HTTP API that gives Linux applications Apple Music playback w
 - **Export** — queue-based track export with tagging.
 - **Events** — a Server-Sent Events channel for DRM state, playback and export progress.
 
+## Get the code
+
+```sh
+git lfs install                       # the bundled native libraries are stored in Git LFS
+git clone https://github.com/silentone12725/musickit-sdk-linux.git
+cd musickit-sdk-linux
+```
+
+Repository: https://github.com/silentone12725/musickit-sdk-linux
+
 ## Quick start
 
 ```sh

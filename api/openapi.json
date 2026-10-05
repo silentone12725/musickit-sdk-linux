@@ -3,7 +3,7 @@
   "info": {
     "title": "musickit-sdk-linux engine API",
     "version": "1.0.0",
-    "description": "HTTP API exposed by apple-music-linux when started with --api <port>. All endpoints require the server to have valid bearer token + media user token configured."
+    "description": "HTTP API exposed by musickit-sdk-linux when started with --api <port>. All endpoints require the server to have valid bearer token + media user token configured."
   },
   "servers": [
     {
