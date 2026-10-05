@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -80,6 +81,16 @@ func NewCDM(privateKey string, clientID []byte, initData []byte) (*CDM, error) {
 
 // Creates a new CDM object using the default device configuration.
 func NewDefaultCDM(initData []byte) (*CDM, error) {
+	identityMu.Lock()
+	err := identityErr
+	loaded := DefaultPrivateKey != ""
+	identityMu.Unlock()
+	if !loaded {
+		if err == nil {
+			err = fmt.Errorf("%w: InitConstants was not called", ErrNoDeviceIdentity)
+		}
+		return nil, fmt.Errorf("%w (looked in %s)", err, IdentityDir())
+	}
 	return NewCDM(DefaultPrivateKey, DefaultClientID, initData)
 }
 
