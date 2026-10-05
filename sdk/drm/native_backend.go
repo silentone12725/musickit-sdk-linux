@@ -139,7 +139,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	if b.drmDir != "" {
 		candidates = append(candidates, filepath.Join(b.drmDir, "rootfs", "system", "lib64"))
 	}
-	// The repo's own drm/ (parent of drm-native / drm-rootless) and the per-user
+	// The repo's own drm/ (the parent of drmDir when drmDir is a subdirectory) and the per-user
 	// dir ensureUserDRM() populates are valid roots too.
 	userDRM := ""
 	if home, err := os.UserHomeDir(); err == nil {
