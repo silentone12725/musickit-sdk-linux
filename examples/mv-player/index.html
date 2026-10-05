@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MV player example</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  input { padding: 6px 8px; } input[name=engine] { flex: 1 1 260px; }
+  video { width: 100%; background: #000; aspect-ratio: 16 / 9; }
+  pre { background: #f4f4f4; padding: 10px; height: 220px; overflow: auto; font-size: 13px; }
+  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } pre { background: #1d1d1d; } }
+</style>
+<h1>MV player example</h1>
+<form id="f">
+  <input name="engine" value="https://127.0.0.1:20025" aria-label="Engine URL">
+  <input name="asset" placeholder="music video id" aria-label="Asset id" size="16">
+  <button>Play</button> <button type="button" id="stop">Stop</button>
+</form>
+<video id="v" controls muted></video>
+<pre id="log" aria-live="polite"></pre>
+<script type="module">
+  import { VsegPlayer } from './vseg-player.js';
+  const $ = (id) => document.getElementById(id), logEl = $('log');
+  const log = (m) => { logEl.textContent += `${new Date().toLocaleTimeString()}  ${m}\n`; logEl.scrollTop = logEl.scrollHeight; };
+  let player = null;
+  $('f').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await player?.stop();
+    const { engine, asset } = Object.fromEntries(new FormData(e.target));
+    player = new VsegPlayer({ engine, video: $('v'), log });
+    window.player = player; // for poking at it from the console
+    try { await player.start(asset); } catch (err) { log(`failed: ${err.message}`); }
+  });
+  $('stop').addEventListener('click', () => player?.stop());
+</script>
