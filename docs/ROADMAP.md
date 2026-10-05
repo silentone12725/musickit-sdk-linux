@@ -27,8 +27,10 @@ Work that is queued, in rough priority order.
 
 - **MV seek latency (step 1).** The from-0 download is parked while a seek producer gets playable (`aacstream.HoldBackground`), because CDN bandwidth is shared across connections.
 
+- **MV seek, fragment-level path.** Seeks fetch and decrypt only the fragment holding the target (about 1.4 s against 2.8 s for the whole segment on the real CDN), with automatic FFmpeg fallback; see [architecture.md](architecture.md#mv-seeking).
+
 ## Planned
-- MV seek, fragment-level path: map a segment's fragments with small range reads, fetch and decrypt only the fragment holding the target, and append it with `timestampOffset = -10` instead of remuxing through FFmpeg, keeping the FFmpeg path as fallback. Measured on the real CDN: about 1.4 s against 2.8 s for the whole segment. The decrypt and Chrome's acceptance of the un-remuxed output are still untested.
+- Validate fragment-level MV seeks against real Widevine-decrypted output in the player (the decrypt and the player's probe have only been exercised with synthetic and FFmpeg-built streams); consider promoting more of the seek flow into a small client library.
 
 - Wire the vendored wrapper's login/2FA handlers to the DRM auth callback so a missing Android session can be created from the engine.
 - Surface lease-recovery state (`Running`, `Scheduled`, `Refreshing`, `Failed`) in `/drm/status` and the SSE `drm` event.

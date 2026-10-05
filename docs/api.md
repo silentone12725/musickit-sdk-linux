@@ -43,7 +43,7 @@ Conventions:
 | GET | `/playback/{id}/audio` | Stream audio (ALAC/AAC/Atmos). Supports `Range`; ALAC is served from the disk cache |
 | GET | `/playback/{id}/video` | Music video stream |
 | GET | `/playback/{id}/video-es`, `video-raw`, `video-dl`, `video-dl-info` | Alternative music-video delivery modes (evolving) |
-| GET | `/playback/{id}/vseg/manifest`, `init`, `seg/{n}`, `seek?t=<seconds>` | Segmented video for MSE players (evolving). `seek` requires `t` ≥ 0 and returns `{n, t}` |
+| GET | `/playback/{id}/vseg/manifest`, `init`, `seg/{n}`, `seek?t=<seconds>` | Segmented video for MSE players (evolving). `seek` requires `t` ≥ 0 and returns `{n, t}`, plus `direct`, `tsOffset` and `reinit` for fragment-level seeks (see [architecture.md](architecture.md#mv-seeking)); `?direct=0` forces the FFmpeg path |
 | DELETE | `/playback/{id}/vseg` | Stop a segmented-video producer |
 | POST | `/playback/{id}/precache` | Warm a session's audio into the cache |
 | DELETE | `/playback/{id}` | Release a session |

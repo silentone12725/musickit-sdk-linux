@@ -35,6 +35,7 @@ The remaining keys (folder templates, tagging, conversion, lyrics format) apply 
 | `MUSICKIT_DISABLE_HIRES=1` | Report `hiRes: false` in `/capabilities` and the DRM snapshot (the account token carries no tier, so hi-res is otherwise assumed once FairPlay is ready) |
 | `MUSICKIT_TLS_PINS` | Comma-separated base64 SPKI SHA-256 pins for the DRM client's HTTPS connections; when set, a handshake succeeds only if some certificate in the served chain matches |
 | `MUSICKIT_WIDEVINE_DIR` | Directory holding `device_private_key` and `device_client_id_blob` (default `~/.config/musickit-sdk-linux/widevine`); required for AAC/MV key requests |
+| `MUSICKIT_MV_DIRECT_SEEK=0` | Disable fragment-level MV seeks and always use the FFmpeg seek producer (on by default for H.264 streams) |
 | `MUSICKIT_DEBUG=1` | Register `/debug/pprof/*` and verbose AAC debug output. Heap dumps can expose key material |
 | `MUSICKIT_CAVERN` | Path to `CavernPipeServer` for lossless Atmos binaural rendering |
 

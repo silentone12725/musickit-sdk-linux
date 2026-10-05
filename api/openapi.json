@@ -1386,7 +1386,7 @@
           "Playback"
         ],
         "summary": "Seek the segmented video",
-        "description": "Switches to an existing producer or starts one near the target. Returns {n, t}: fragment index and actual start time.",
+        "description": "Switches to an existing producer or starts one near the target. Returns {n, t} plus, for fragment-level seeks, direct/tsOffset/reinit. When 'direct' is true the fragments keep the stream's raw timeline: set the SourceBuffer's timestampOffset to tsOffset (negative) instead of t. When 'reinit' is true, fetch the session's /vseg/init and append it before any fragment.",
         "parameters": [
           {
             "name": "id",
@@ -1407,6 +1407,18 @@
               "type": "number",
               "minimum": 0
             }
+          },
+          {
+            "name": "direct",
+            "in": "query",
+            "required": false,
+            "description": "Pass 0 to refuse a fragment-level seek and use the FFmpeg seek producer",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0"
+              ]
+            }
           }
         ],
         "responses": {
@@ -1418,10 +1430,24 @@
                   "type": "object",
                   "properties": {
                     "n": {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "Fragment index to start fetching from"
                     },
                     "t": {
-                      "type": "number"
+                      "type": "number",
+                      "description": "Playlist time of the first fragment, in seconds"
+                    },
+                    "direct": {
+                      "type": "boolean",
+                      "description": "True when served by the fragment-level path (decrypted fragments, no FFmpeg remux)"
+                    },
+                    "tsOffset": {
+                      "type": "number",
+                      "description": "Direct only: seconds to add to fragment timestamps to get playlist time (typically -10)"
+                    },
+                    "reinit": {
+                      "type": "boolean",
+                      "description": "True when the init segment differs from the one last handed out and must be re-appended"
                     }
                   }
                 }

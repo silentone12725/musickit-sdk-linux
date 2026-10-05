@@ -63,6 +63,27 @@ To add an endpoint: write a handler method on `APIServer`, register it in `NewAP
 4. Decrypted fragments are written to the disk cache and served with range support; libvlc reads them in-process.
 5. The prefetch scheduler, driven by `PUT /playback/context`, warms the next tracks the same way.
 
+## MV seeking
+
+Music-video playback is served to the browser as MSE fragments (`/playback/{id}/vseg/*`). A *base* producer
+downloads from t=0 and builds the index; seeks it hasn't reached yet start a second producer. There are two:
+
+| | Fragment-level (default for H.264) | FFmpeg |
+|---|---|---|
+| Fetches | only the fragment holding the target, then the rest | the whole HLS segment holding the target |
+| How | range reads map the segment's `moof`/`mdat` boxes (no `sidx`); the decrypt stage runs on `[init][fragments…]` | decrypted stream piped through `ffmpeg -c copy` |
+| Timeline | raw: playlist time + a constant (10 s for Apple MVs); the response carries `tsOffset` | rebased to 0; the player offsets by `t` |
+| Init segment | the decrypted original (`reinit` tells the player to re-append it) | FFmpeg's |
+
+Why it works: each fragment starts on a sync sample and carries its own `senc`, so it decrypts without the ones
+before it, and CDN bandwidth is shared, so fetching less of the segment is what speeds a seek up.
+
+Fallbacks, in order: the engine uses the FFmpeg producer if planning fails, the CDN ignores `Range`, the layout is
+unexpected, the first fragment doesn't arrive in time, or the stream isn't H.264; the player validates the first
+direct output in a throwaway `MediaSource` (a rejected append would kill the real element) and re-seeks with
+`?direct=0` if Chrome refuses it or places it wrongly. `MUSICKIT_MV_DIRECT_SEEK=0` turns the path off.
+While a seek producer is getting playable, the base download is paused (`aacstream.HoldBackground`).
+
 ## Extension points
 
 - **A new media provider:** implement `media.Provider`; nothing else in the pipeline changes.
