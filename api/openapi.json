@@ -3,12 +3,17 @@
   "info": {
     "title": "musickit-sdk-linux engine API",
     "version": "1.0.0",
-    "description": "HTTP API exposed by musickit-sdk-linux when started with --api <port>. All endpoints require the server to have valid bearer token + media user token configured."
+    "description": "Local HTTP API of the musickit-sdk-linux engine (`musickit-engine --api <port>`). Served over HTTPS on 127.0.0.1 with a per-run self-signed certificate. Requests must carry a loopback Host; a browser Origin, if present, must be loopback or https://music.apple.com. Stability notes and workflows: docs/api.md."
   },
   "servers": [
     {
-      "url": "http://127.0.0.1:8080",
-      "description": "Local engine"
+      "url": "https://127.0.0.1:{port}",
+      "description": "Local engine (self-signed certificate)",
+      "variables": {
+        "port": {
+          "default": "20025"
+        }
+      }
     }
   ],
   "paths": {
@@ -27,7 +32,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "System"
+        ]
       }
     },
     "/api/v1/capabilities": {
@@ -51,7 +59,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "System"
+        ]
       }
     },
     "/api/v1/events": {
@@ -66,7 +77,10 @@
               "text/event-stream": {}
             }
           }
-        }
+        },
+        "tags": [
+          "System"
+        ]
       }
     },
     "/api/v1/playback": {
@@ -110,7 +124,10 @@
           "502": {
             "description": "Apple Music API error"
           }
-        }
+        },
+        "tags": [
+          "Playback"
+        ]
       }
     },
     "/api/v1/playback/{id}/audio": {
@@ -137,7 +154,10 @@
           "404": {
             "description": "Session not found or expired"
           }
-        }
+        },
+        "tags": [
+          "Playback"
+        ]
       }
     },
     "/api/v1/playback/{id}/video": {
@@ -164,7 +184,10 @@
           "404": {
             "description": "Session not found, expired, or has no video track"
           }
-        }
+        },
+        "tags": [
+          "Playback"
+        ]
       }
     },
     "/api/v1/playback/{id}": {
@@ -185,7 +208,10 @@
           "204": {
             "description": "Session released"
           }
-        }
+        },
+        "tags": [
+          "Playback"
+        ]
       }
     },
     "/api/v1/metadata/{id}": {
@@ -236,7 +262,10 @@
           "404": {
             "description": "Asset not found"
           }
-        }
+        },
+        "tags": [
+          "Metadata"
+        ]
       }
     },
     "/api/v1/artwork/{id}": {
@@ -280,7 +309,10 @@
           "404": {
             "description": "Asset not found"
           }
-        }
+        },
+        "tags": [
+          "Metadata"
+        ]
       }
     },
     "/api/v1/lyrics/{id}": {
@@ -340,7 +372,10 @@
           "404": {
             "description": "Lyrics unavailable for this track or region"
           }
-        }
+        },
+        "tags": [
+          "Metadata"
+        ]
       }
     },
     "/api/v1/export": {
@@ -390,7 +425,10 @@
           "401": {
             "description": "Not authenticated"
           }
-        }
+        },
+        "tags": [
+          "Export"
+        ]
       },
       "get": {
         "summary": "List all export jobs",
@@ -409,7 +447,10 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Export"
+        ]
       }
     },
     "/api/v1/export/{id}": {
@@ -440,7 +481,10 @@
           "404": {
             "description": "Job not found"
           }
-        }
+        },
+        "tags": [
+          "Export"
+        ]
       },
       "delete": {
         "summary": "Cancel an export job",
@@ -462,7 +506,10 @@
           "404": {
             "description": "Job not found"
           }
-        }
+        },
+        "tags": [
+          "Export"
+        ]
       }
     },
     "/api/v1/export/{id}/retry": {
@@ -496,7 +543,10 @@
           "404": {
             "description": "Job not found"
           }
-        }
+        },
+        "tags": [
+          "Export"
+        ]
       }
     },
     "/api/v1/recommendations": {
@@ -546,7 +596,10 @@
           "502": {
             "description": "Upstream failure"
           }
-        }
+        },
+        "tags": [
+          "Recommendations"
+        ]
       }
     },
     "/api/v1/recommendations/heavy-rotation": {
@@ -596,7 +649,10 @@
           "502": {
             "description": "Upstream failure"
           }
-        }
+        },
+        "tags": [
+          "Recommendations"
+        ]
       }
     },
     "/api/v1/recommendations/recently-played": {
@@ -645,6 +701,1440 @@
           },
           "502": {
             "description": "Upstream failure"
+          }
+        },
+        "tags": [
+          "Recommendations"
+        ]
+      }
+    },
+    "/api/v1/tools": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Helper tools found",
+        "description": "Reports which optional tools (ffmpeg, MP4Box, VLC) the engine located.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Engine metrics",
+        "description": "Internal latency and cache metrics.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/debug/runtime": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Runtime statistics",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug/pprof/": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "pprof index",
+        "description": "Only registered when MUSICKIT_DEBUG=1. Heap and goroutine dumps can expose key material.",
+        "responses": {
+          "200": {
+            "description": "pprof data"
+          }
+        }
+      }
+    },
+    "/debug/pprof/cmdline": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "pprof command line",
+        "description": "Only registered when MUSICKIT_DEBUG=1. Heap and goroutine dumps can expose key material.",
+        "responses": {
+          "200": {
+            "description": "pprof data"
+          }
+        }
+      }
+    },
+    "/debug/pprof/profile": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "pprof CPU profile",
+        "description": "Only registered when MUSICKIT_DEBUG=1. Heap and goroutine dumps can expose key material.",
+        "responses": {
+          "200": {
+            "description": "pprof data"
+          }
+        }
+      }
+    },
+    "/debug/pprof/symbol": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "pprof symbol lookup",
+        "description": "Only registered when MUSICKIT_DEBUG=1. Heap and goroutine dumps can expose key material.",
+        "responses": {
+          "200": {
+            "description": "pprof data"
+          }
+        }
+      }
+    },
+    "/debug/pprof/trace": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "pprof execution trace",
+        "description": "Only registered when MUSICKIT_DEBUG=1. Heap and goroutine dumps can expose key material.",
+        "responses": {
+          "200": {
+            "description": "pprof data"
+          }
+        }
+      }
+    },
+    "/api/v1/drm/status": {
+      "get": {
+        "tags": [
+          "DRM"
+        ],
+        "summary": "DRM status",
+        "description": "DRM snapshot plus backend selection and session timing.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DRMStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/drm/authenticate": {
+      "post": {
+        "tags": [
+          "DRM"
+        ],
+        "summary": "Start a login",
+        "description": "Begin an Apple ID login (max 4 KB). A 2FA challenge, if any, is answered via /drm/challenge.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DRMAuthRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Login started"
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "DRM backend unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/drm/challenge": {
+      "post": {
+        "tags": [
+          "DRM"
+        ],
+        "summary": "Answer a 2FA challenge",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DRMChallengeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted"
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/drm/logout": {
+      "post": {
+        "tags": [
+          "DRM"
+        ],
+        "summary": "Sign out",
+        "responses": {
+          "200": {
+            "description": "Signed out"
+          }
+        }
+      }
+    },
+    "/api/v1/drm/session": {
+      "delete": {
+        "tags": [
+          "DRM"
+        ],
+        "summary": "Drop the stored session",
+        "responses": {
+          "204": {
+            "description": "No content"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/context": {
+      "put": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Signal the current queue",
+        "description": "Lets the prefetcher warm upcoming tracks. Max 512 KB.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackContext"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/precache": {
+      "post": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Warm a session's audio into the cache",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Started"
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/video-es": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Music-video H.264 elementary stream",
+        "description": "Demuxed H.264 stream for WebCodecs-style players.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media bytes"
+          },
+          "404": {
+            "description": "Session not found or expired"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/video-raw": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Raw decrypted multi-track fMP4",
+        "description": "Before remux; useful for pipeline debugging with ffprobe.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media bytes"
+          },
+          "404": {
+            "description": "Session not found or expired"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/video-dl": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Music-video download stream",
+        "description": "Full download delivery mode.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media bytes"
+          },
+          "404": {
+            "description": "Session not found or expired"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/video-dl-info": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Music-video download info",
+        "description": "Metadata for video-dl.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media bytes"
+          },
+          "404": {
+            "description": "Session not found or expired"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/vseg/manifest": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Segmented-video manifest",
+        "description": "Non-blocking JSON snapshot of the fragment index. `frags: []` is valid while the producer starts; `done:true` marks the end.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "codecs": {
+                      "type": "string"
+                    },
+                    "timescale": {
+                      "type": "integer"
+                    },
+                    "frags": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "t": {
+                            "type": "number"
+                          },
+                          "n": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "done": {
+                      "type": "boolean"
+                    },
+                    "err": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/vseg/init": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Segmented-video init segment",
+        "description": "ftyp+moov initialisation segment (fMP4).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "video/mp4 init segment"
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/vseg/seg/{n}": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Segmented-video fragment N",
+        "description": "Streams fragment N (moof+mdat). Blocks until the fragment is indexed; the response is bounded by the fragment's end.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "video/mp4 fragment"
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/vseg/seek": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Seek the segmented video",
+        "description": "Switches to an existing producer or starts one near the target. Returns {n, t}: fragment index and actual start time.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          },
+          {
+            "name": "t",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            },
+            "description": "Target time in seconds"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "n": {
+                      "type": "integer"
+                    },
+                    "t": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/vseg": {
+      "delete": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Stop the segmented-video producer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Cache-warm job status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Cancel a cache-warm job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          }
+        }
+      }
+    },
+    "/api/v1/audioanalysis/{id}": {
+      "get": {
+        "tags": [
+          "Metadata"
+        ],
+        "summary": "Audio analysis",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Track ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          },
+          {
+            "name": "sf",
+            "in": "query",
+            "description": "Storefront (default: session storefront, then us)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/albums/{id}": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Album detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Album ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          },
+          {
+            "name": "sf",
+            "in": "query",
+            "description": "Storefront (default: session storefront, then us)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Apple Music album resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "502": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/playlists/{id}": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Playlist detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playlist ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          },
+          {
+            "name": "sf",
+            "in": "query",
+            "description": "Storefront (default: session storefront, then us)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Apple Music playlist resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "502": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/artists/{id}": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Artist detail",
+        "description": "Includes up to 20 albums and 10 songs.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Artist ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          },
+          {
+            "name": "sf",
+            "in": "query",
+            "description": "Storefront (default: session storefront, then us)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Apple Music artist resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "502": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/library/token": {
+      "post": {
+        "tags": [
+          "Library"
+        ],
+        "summary": "Provide listener tokens",
+        "description": "Max 16 KB. Required for personalised feeds and live library fetches.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibraryTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/library/ingest": {
+      "post": {
+        "tags": [
+          "Library"
+        ],
+        "summary": "Replace the library cache",
+        "description": "Max 100 MB. The client downloads the library and ingests it here.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestPayload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "songs": {
+                      "type": "integer"
+                    },
+                    "albums": {
+                      "type": "integer"
+                    },
+                    "playlists": {
+                      "type": "integer"
+                    },
+                    "syncedAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/library/sync": {
+      "post": {
+        "tags": [
+          "Library"
+        ],
+        "summary": "Deprecated",
+        "description": "Always 410 Gone. Use /library/ingest.",
+        "responses": {
+          "410": {
+            "description": "Gone"
+          }
+        }
+      }
+    },
+    "/api/v1/library/status": {
+      "get": {
+        "tags": [
+          "Library"
+        ],
+        "summary": "Library cache status",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/library/playlists": {
+      "get": {
+        "tags": [
+          "Library"
+        ],
+        "summary": "Cached playlists",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "playlists": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/library/playlists/{id}/tracks": {
+      "get": {
+        "tags": [
+          "Library"
+        ],
+        "summary": "Tracks of a library playlist",
+        "description": "Served from the cache; on a miss with tokens available, fetched live and cached.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Library playlist ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryTracks"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/library/albums/{id}/tracks": {
+      "get": {
+        "tags": [
+          "Library"
+        ],
+        "summary": "Tracks of a library album",
+        "description": "`l.` is prefixed to the ID if missing.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Library album ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryTracks"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/stats": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Cache statistics",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheStats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cache/config": {
+      "put": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Set cache limits",
+        "description": "Max 4 KB; omitted fields are unchanged.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CacheConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Effective config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheConfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/playback": {
+      "delete": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear playback caches",
+        "description": "what = persistent | prewarm | segments; omit for all.",
+        "parameters": [
+          {
+            "name": "what",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "persistent",
+                "prewarm",
+                "segments"
+              ]
+            },
+            "description": "persistent, prewarm or segments (empty = all)"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/mv": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Music-video cache info",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MVCache"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Configure the music-video cache",
+        "description": "Max 4 KB.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MVCacheUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MVCache"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear the music-video cache",
+        "responses": {
+          "204": {
+            "description": "No content"
+          }
+        }
+      }
+    },
+    "/api/v1/export/{id}/priority": {
+      "post": {
+        "tags": [
+          "Export"
+        ],
+        "summary": "Reprioritise a queued job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportPriorityRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "404": {
+            "description": "Error (plain-text body)"
+          },
+          "409": {
+            "description": "Already running or finished"
+          }
+        }
+      }
+    },
+    "/api/v1/vlc/load": {
+      "post": {
+        "tags": [
+          "VLC"
+        ],
+        "summary": "Load a session into the in-process player",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VLCLoadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Loaded"
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          },
+          "503": {
+            "description": "libvlc unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/vlc/pause": {
+      "post": {
+        "tags": [
+          "VLC"
+        ],
+        "summary": "Pause playback",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/vlc/resume": {
+      "post": {
+        "tags": [
+          "VLC"
+        ],
+        "summary": "Resume playback",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/vlc/stop": {
+      "post": {
+        "tags": [
+          "VLC"
+        ],
+        "summary": "Stop playback",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/vlc/seek": {
+      "post": {
+        "tags": [
+          "VLC"
+        ],
+        "summary": "Seek",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VLCSeekRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/vlc/volume": {
+      "post": {
+        "tags": [
+          "VLC"
+        ],
+        "summary": "Set volume",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VLCVolumeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Error (plain-text body)"
+          }
+        }
+      }
+    },
+    "/api/v1/vlc/time": {
+      "get": {
+        "tags": [
+          "VLC"
+        ],
+        "summary": "Current position and state",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         }
       }
@@ -819,12 +2309,18 @@
             "type": "string"
           },
           "storefront": {
+            "type": "string"
+          },
+          "token": {
             "type": "string",
-            "default": "us"
+            "description": "Developer JWT (optional override)"
+          },
+          "mut": {
+            "type": "string",
+            "description": "Music-User-Token (optional override)"
           },
           "language": {
-            "type": "string",
-            "default": "en-US"
+            "type": "string"
           },
           "capabilities": {
             "type": "object",
@@ -837,52 +2333,53 @@
               },
               "video": {
                 "type": "boolean"
+              },
+              "playlist": {
+                "type": "boolean"
+              },
+              "libraryPlaylist": {
+                "type": "boolean"
               }
             }
           },
+          "mvMaxHeight": {
+            "type": "integer"
+          },
           "outputDir": {
-            "type": "string",
-            "description": "Absolute path. Defaults to ~/Music."
+            "type": "string"
           },
           "filenameTemplate": {
             "type": "string",
-            "description": "Supports {title}, {artist}, {album_artist}, {album}, {track_number:02d}, {disc_number}, {year}, {genre}, {codec}, {ext}",
             "example": "{album_artist}/{album}/{track_number:02d} - {title}"
           },
           "options": {
             "type": "object",
             "properties": {
               "embedArtwork": {
-                "type": "boolean",
-                "default": true
+                "type": "boolean"
               },
               "artworkSize": {
-                "type": "integer",
-                "default": 3000
+                "type": "integer"
               },
               "embedLyrics": {
-                "type": "boolean",
-                "default": false
+                "type": "boolean"
               },
               "lrcFormat": {
                 "type": "string",
                 "enum": [
                   "lrc",
                   "ttml"
-                ],
-                "default": "lrc"
+                ]
               },
               "lrcType": {
                 "type": "string",
                 "enum": [
                   "lyrics",
                   "syllable-lyrics"
-                ],
-                "default": "lyrics"
+                ]
               },
               "saveLrcSidecar": {
-                "type": "boolean",
-                "default": false
+                "type": "boolean"
               },
               "overwritePolicy": {
                 "type": "string",
@@ -890,23 +2387,42 @@
                   "skip",
                   "overwrite",
                   "rename"
-                ],
-                "default": "skip"
+                ]
               },
               "convertToFlac": {
-                "type": "boolean",
-                "default": false
+                "type": "boolean"
+              },
+              "vlcPath": {
+                "type": "string"
               },
               "ffmpegPath": {
-                "type": "string",
-                "description": "Path to ffmpeg binary. Defaults to 'ffmpeg' on PATH."
+                "type": "string"
               },
               "keepOriginal": {
-                "type": "boolean",
-                "default": false,
-                "description": "Keep .m4a when convertToFlac is true."
+                "type": "boolean"
+              },
+              "explicitChoice": {
+                "type": "string"
+              },
+              "cleanChoice": {
+                "type": "string"
+              },
+              "masterChoice": {
+                "type": "string"
               }
             }
+          },
+          "hintTitle": {
+            "type": "string"
+          },
+          "hintArtist": {
+            "type": "string"
+          },
+          "hintArtwork": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
           }
         }
       },
@@ -933,17 +2449,56 @@
             ]
           },
           "percent": {
+            "type": "integer"
+          },
+          "queuePos": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 100
+            "format": "int64"
+          },
+          "queueIndex": {
+            "type": "integer"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "artistName": {
+            "type": "string"
+          },
+          "artworkUrl": {
+            "type": "string"
+          },
+          "bytesDone": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "bytesTotal": {
+            "type": "integer",
+            "format": "int64"
           },
           "output": {
-            "type": "string",
-            "description": "Final file path; set when phase=done"
+            "type": "string"
           },
           "error": {
+            "type": "string"
+          },
+          "source": {
             "type": "string",
-            "description": "Error message; set when phase=failed"
+            "enum": [
+              "cache",
+              "playback",
+              "network"
+            ]
+          },
+          "limitBps": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "throttled": {
+            "type": "boolean"
           },
           "createdAt": {
             "type": "string",
@@ -954,7 +2509,373 @@
             "format": "date-time"
           }
         }
+      },
+      "DRMAuthRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "DRMChallengeRequest": {
+        "type": "object",
+        "required": [
+          "reply"
+        ],
+        "properties": {
+          "reply": {
+            "type": "string",
+            "description": "2FA code or other challenge answer"
+          }
+        }
+      },
+      "DRMStatus": {
+        "type": "object",
+        "description": "DRM snapshot (process, manager, authentication, FairPlay, session and recovery state) plus backend selection and session timing",
+        "properties": {
+          "backend": {
+            "type": "object",
+            "properties": {
+              "selected": {
+                "type": "string"
+              },
+              "fallbackReason": {
+                "type": "string"
+              }
+            }
+          },
+          "readySinceMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionAgeMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionTTLMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": true
+      },
+      "PlaybackContext": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "currentIndex": {
+            "type": "integer"
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "lossless": {
+            "type": "boolean"
+          }
+        }
+      },
+      "JobAccepted": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string"
+          }
+        }
+      },
+      "VLCLoadRequest": {
+        "type": "object",
+        "required": [
+          "sessionId"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "assetId": {
+            "type": "string"
+          },
+          "startMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "VLCSeekRequest": {
+        "type": "object",
+        "properties": {
+          "posMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "VLCVolumeRequest": {
+        "type": "object",
+        "properties": {
+          "volume": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      },
+      "LibraryTokenRequest": {
+        "type": "object",
+        "properties": {
+          "musicUserToken": {
+            "type": "string"
+          },
+          "developerToken": {
+            "type": "string"
+          }
+        }
+      },
+      "LibraryTrack": {
+        "type": "object",
+        "properties": {
+          "lid": {
+            "type": "string",
+            "description": "Library song ID"
+          },
+          "cid": {
+            "type": "string",
+            "description": "Catalog ID"
+          }
+        }
+      },
+      "LibraryTracks": {
+        "type": "object",
+        "properties": {
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LibraryTrack"
+            }
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "LibraryStatus": {
+        "type": "object",
+        "properties": {
+          "songs": {
+            "type": "integer"
+          },
+          "albums": {
+            "type": "integer"
+          },
+          "playlists": {
+            "type": "integer"
+          },
+          "syncedAt": {
+            "type": "string"
+          },
+          "needsSync": {
+            "type": "boolean"
+          }
+        }
+      },
+      "IngestPayload": {
+        "type": "object",
+        "properties": {
+          "songs": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "albums": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "playlists": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "playlistTracks": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "revision": {
+            "type": "string"
+          }
+        }
+      },
+      "CacheConfig": {
+        "type": "object",
+        "properties": {
+          "prewarmLimitMB": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "persistLimitMB": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "persistTTLDays": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CacheStats": {
+        "type": "object",
+        "properties": {
+          "persistent": {
+            "type": "object",
+            "properties": {
+              "available": {
+                "type": "boolean"
+              },
+              "sizeBytes": {
+                "type": "integer"
+              },
+              "limitBytes": {
+                "type": "integer"
+              },
+              "ttlDays": {
+                "type": "integer"
+              },
+              "count": {
+                "type": "integer"
+              }
+            }
+          },
+          "prewarm": {
+            "type": "object",
+            "properties": {
+              "entries": {
+                "type": "integer"
+              },
+              "sizeBytes": {
+                "type": "integer"
+              },
+              "limitBytes": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "MVCache": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "maxBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "quality": {
+            "type": "string"
+          }
+        }
+      },
+      "MVCacheUpdate": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "maxBytes": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ExportPriorityRequest": {
+        "type": "object",
+        "required": [
+          "priority"
+        ],
+        "properties": {
+          "priority": {
+            "type": "integer"
+          }
+        }
       }
     }
-  }
+  },
+  "tags": [
+    {
+      "name": "System"
+    },
+    {
+      "name": "DRM"
+    },
+    {
+      "name": "Playback"
+    },
+    {
+      "name": "VLC"
+    },
+    {
+      "name": "Metadata"
+    },
+    {
+      "name": "Catalog"
+    },
+    {
+      "name": "Recommendations"
+    },
+    {
+      "name": "Library"
+    },
+    {
+      "name": "Cache"
+    },
+    {
+      "name": "Export"
+    },
+    {
+      "name": "Debug"
+    }
+  ]
 }

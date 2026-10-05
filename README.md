@@ -79,7 +79,7 @@ musickit-sdk-linux/
 │               drm, ampapi, library, export, prefetch, vlc, …  (no HTTP server)
 ├── server/     Go module: the HTTP API as an importable package + cmd/musickit-engine
 ├── examples/   Go module: runnable examples (SDK-only Go program, curl and Node clients)
-├── api/        openapi.json
+├── api/        openapi.json (every route; checked against the server by a test)
 ├── scripts/    build helpers
 └── docs/       documentation
 ```

@@ -1,6 +1,6 @@
 # HTTP API reference
 
-Base URL: `https://127.0.0.1:<port>/api/v1` (the port is the `--api` flag). The certificate is generated per run for loopback use; clients must either trust it for that connection (`curl -k`) or pin it.
+The complete machine-readable description is [`api/openapi.json`](../api/openapi.json) (OpenAPI 3.0, all routes); a test in `server/` fails if a route is added or removed without updating it. Base URL: `https://127.0.0.1:<port>/api/v1` (the port is the `--api` flag). The certificate is generated per run for loopback use; clients must either trust it for that connection (`curl -k`) or pin it.
 
 Conventions:
 

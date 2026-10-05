@@ -66,4 +66,4 @@ Implement `media.Provider` for another catalog, or `pipeline.Stage` for an audio
 1. Handler + validation in `server/handlers_<area>.go`.
 2. Route in `NewAPIServer`.
 3. Test with `httptest` (fake upstream where needed).
-4. Entry in `docs/api.md` and `api/openapi.json`.
+4. Entry in `docs/api.md` and `api/openapi.json` (`TestOpenAPICoversEveryRoute` fails until the route is in the spec).
