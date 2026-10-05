@@ -1,8 +1,9 @@
 # Makefile for DRM client clean-room implementation
 #
 # Builds libdrm_client.so shared library and test executable.
-# The library embeds all Android .so dependencies as binary blobs (memfd
-# approach), so no rootfs/system/lib64/ directory is needed at runtime.
+# The library embeds libhybris-core.so (loaded from a memfd). The Android libraries are NOT
+# embedded: they load from rootfs/system/lib64 on disk, which must hold everything in
+# android-libs.txt.
 
 CC = gcc
 AS = as
@@ -16,8 +17,17 @@ LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 # override HYBRIS_CORE to use your own build. Relative paths only (the recipe is not space-safe).
 HYBRIS_CORE ?= libhybris-core.so
 
-# Android library directory (embedded into the .so at build time)
+# Android library directory (loaded from disk at runtime)
 LIB64 = rootfs/system/lib64
+
+# libandroid.so and libOpenSLES.so are listed as dependencies by Apple's libraries but nothing
+# is imported from them, so they are built here from an empty stub instead of shipping the real
+# ones (which drag in the whole Android graphics/media stack). See stubs/empty_stub.c.
+STUB_LIBS = $(LIB64)/libandroid.so $(LIB64)/libOpenSLES.so
+$(STUB_LIBS): stubs/empty_stub.c
+	@mkdir -p $(LIB64)
+	$(CC) -shared -fPIC -nostdlib -O2 -Wl,-soname,$(notdir $@) -Wl,--hash-style=both -o $@ $<
+android-stubs: $(STUB_LIBS)
 
 # ICU open-source build (x86_64-linux-android via NDK).
 # `make build-icu` (or `make`) runs build-icu-ndk.sh which builds ICU 68.2
@@ -27,34 +37,11 @@ ICU_LIBS = $(LIB64)/libicudata_sv_apple.so \
            $(LIB64)/libicuuc_sv_apple.so \
            $(LIB64)/libicui18n_sv_apple.so
 
-# Ordered list of Android .so files to embed (deps before dependents)
-EMBED_LIBS = \
-    libandroid.so \
-    libc++_shared.so \
-    libBlocksRuntime.so \
-    libdispatch.so \
-    libCoreFoundation.so \
-    libicudata_sv_apple.so \
-    libicuuc_sv_apple.so \
-    libicui18n_sv_apple.so \
-    libxml2.so \
-    libmediaplatform.so \
-    libCoreFP.so \
-    libCoreADI.so \
-    libCoreLSKD.so \
-    libdaapkit.so \
-    libmedialibrarycore.so \
-    libOpenSLES.so \
-    libstoreservicescore.so \
-    libandroidappmusic.so
-
 # Embedded blob output directory
 BLOBS_DIR = embedded_blobs
 
-# Per-lib blob objects + symtable object
-EMBED_BLOB_OBJS = $(BLOBS_DIR)/libhybris-core.so.o \
-                  $(addprefix $(BLOBS_DIR)/,$(addsuffix .o,$(EMBED_LIBS))) \
-                  $(BLOBS_DIR)/symtable.o
+# libhybris-core.so is embedded and loaded from a memfd (see embedded_loader.c)
+EMBED_BLOB_OBJS = $(BLOBS_DIR)/libhybris-core.so.o
 
 EMBEDDED_LOADER_OBJ = $(BLOBS_DIR)/embedded_loader.o
 
@@ -131,9 +118,7 @@ $(BLOBS_DIR):
 # Generate all blob .S files and symtable in one pass, assemble each.
 # The sentinel file tracks whether blobs are up to date vs. source .so files.
 # ICU libs are built from source first via the $(ICU_LIBS) target.
-$(BLOBS_DIR)/.blobs_built: $(HYBRIS_CORE) \
-                             $(addprefix $(LIB64)/,$(EMBED_LIBS)) \
-                             | $(BLOBS_DIR)
+$(BLOBS_DIR)/.blobs_built: $(HYBRIS_CORE) | $(BLOBS_DIR)
 	@echo "=== Generating embedded library blobs ==="
 	@# ── libhybris-core.so blob ──
 	@ident=libhybris_core_so; \
@@ -146,39 +131,8 @@ $(BLOBS_DIR)/.blobs_built: $(HYBRIS_CORE) \
 	     "$$ident" "$$ident" "$$ident" "$$ident" >> $(BLOBS_DIR)/libhybris-core.so.S; \
 	 $(AS) -o $(BLOBS_DIR)/libhybris-core.so.o $(BLOBS_DIR)/libhybris-core.so.S; \
 	 echo "  embedded libhybris-core.so"
-	@# ── Per-lib blobs ──
-	@for lib in $(EMBED_LIBS); do \
-	     lib_path=$(LIB64)/$$lib; \
-	     ident=$$(echo "$$lib" | sed 's/[.]/_/g; s/++/pp/g'); \
-	     printf '.section .rodata."%s"\n.global %s_data\n.global %s_size\n.global %s_data_end\n.type %s_data, @object\n.type %s_size, @object\n.type %s_data_end, @object\n\n%s_data:\n' \
-	         "$$lib" "$$ident" "$$ident" "$$ident" "$$ident" "$$ident" "$$ident" "$$ident" \
-	         > $(BLOBS_DIR)/$$lib.S; \
-	     xxd -p "$$lib_path" | sed 's/\(..\)/0x\1,/g' | sed 's/,$$//' | awk '{print "    .byte " $$0}' \
-	         >> $(BLOBS_DIR)/$$lib.S; \
-	     printf '\n%s_data_end:\n\n%s_size:\n    .quad %s_data_end - %s_data\n' \
-	         "$$ident" "$$ident" "$$ident" "$$ident" >> $(BLOBS_DIR)/$$lib.S; \
-	     $(AS) -o $(BLOBS_DIR)/$$lib.o $(BLOBS_DIR)/$$lib.S; \
-	     echo "  embedded $$lib"; \
-	 done
-	@# ── symtable.S — layout must match embedded_lib_entry_t {data*, uint64_t size, name*} ──
-	@printf '.section .data.rel.ro\n.global embedded_libs\n.global num_embedded_libs\n.type embedded_libs, @object\n.type num_embedded_libs, @object\n\nembedded_libs:\n' \
-	    > $(BLOBS_DIR)/symtable.S
-	@for lib in $(EMBED_LIBS); do \
-	     lib_path=$(LIB64)/$$lib; \
-	     ident=$$(echo "$$lib" | sed 's/[.]/_/g; s/++/pp/g'); \
-	     lib_size=$$(stat -c%s "$$lib_path"); \
-	     printf '    .quad %s_data\n    .quad %d\n    .quad .Lname_%s\n' \
-	         "$$ident" "$$lib_size" "$$ident" >> $(BLOBS_DIR)/symtable.S; \
-	 done
-	@count=0; for lib in $(EMBED_LIBS); do count=$$((count+1)); done; \
-	 printf '\nnum_embedded_libs:\n    .quad %d\n\n' "$$count" >> $(BLOBS_DIR)/symtable.S
-	@for lib in $(EMBED_LIBS); do \
-	     ident=$$(echo "$$lib" | sed 's/[.]/_/g; s/++/pp/g'); \
-	     printf '.Lname_%s:\n    .asciz "%s"\n' "$$ident" "$$lib" >> $(BLOBS_DIR)/symtable.S; \
-	 done
-	@$(AS) -o $(BLOBS_DIR)/symtable.o $(BLOBS_DIR)/symtable.S
 	@touch $@
-	@echo "=== Blob generation complete ($(words $(EMBED_LIBS)) libs + hybris-core) ==="
+	@echo "=== Blob generation complete ==="
 
 # All blob .o files are created atomically by the .blobs_built recipe.
 # This empty rule tells Make "these targets exist after .blobs_built runs."
@@ -232,7 +186,7 @@ clean-objs:
 clean: clean-objs
 	rm -f $(TARGET)
 
-# Build the library, then drop everything it was built from (the blobs alone are ~400 MB).
+# Build the library, then drop everything it was built from (objects and generated blobs).
 # The next `make` regenerates them.
 release: $(TARGET)
 	$(MAKE) clean-objs
@@ -293,5 +247,5 @@ coverage: LDFLAGS_LIB += --coverage
 coverage: LDFLAGS_TEST += --coverage
 coverage: clean all
 
-.PHONY: all clean clean-objs release clean-icu install uninstall test test-https test-realworld test-all \
+.PHONY: all android-stubs clean clean-objs release clean-icu install uninstall test test-https test-realworld test-all \
         analyze format-check format valgrind-test coverage probe gen-blobs build-icu
