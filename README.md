@@ -26,8 +26,7 @@ A local engine and HTTP API that gives Linux applications Apple Music playback w
 
 ```sh
 # 1. Install the Android/Apple Music libs, then build the DRM client and engine
-#    (libhybris is included; see docs/building.md)
-scripts/install-android-libs.sh /path/to/lib64
+#    (libhybris and the Android/Apple Music libs are included; see docs/building.md)
 make -C drm libdrm_client.so
 scripts/build-engine.sh dist
 

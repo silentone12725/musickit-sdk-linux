@@ -8,15 +8,15 @@
 | gcc, g++, make, GNU as, xxd | `drm/` |
 | OpenSSL and libcurl development files | `drm/` |
 | libvlc development files | `sdk/vlc` (in-process playback) |
-| Android rootfs libraries (`libc.so`, Apple Music libs, …) | FairPlay (runtime and `drm/` build); **not in the repository**, installed with `scripts/install-android-libs.sh` |
+| Android rootfs libraries (`libc.so`, Apple Music libs, …) | FairPlay (runtime and `drm/` build); **included** in `drm/rootfs/system/lib64`; replace with `scripts/install-android-libs.sh` |
 | ffmpeg, MP4Box (optional) | export, video remux |
 
-libhybris is **included**: `drm/libhybris-core.so` and `drm/hybris-linker/q.so` are prebuilt, with source provenance, patch, licences and a rebuild script in `drm/vendor/libhybris/`. The Android and Apple Music native libraries are proprietary and are **not committed**; you install them from a source you are entitled to use (below).
+libhybris is **included**: `drm/libhybris-core.so` and `drm/hybris-linker/q.so` are prebuilt, with source provenance, patch, licences and a rebuild script in `drm/vendor/libhybris/`. The Android and Apple Music native libraries are also **included** (`drm/rootfs/system/lib64`, 99 files, ~116 MB). They are proprietary third-party binaries; see [NOTICE.md](../NOTICE.md). To use a different set, run `scripts/install-android-libs.sh` (below).
 
 ## Steps
 
 ```sh
-# 0. Install the Android / Apple Music native libraries into drm/rootfs/system/lib64
+# 0. (optional) replace the bundled Android / Apple Music libraries
 scripts/install-android-libs.sh /path/to/lib64          # or a rootfs dir, or a tarball
 
 # 1. DRM client library (uses the vendored libhybris-core.so)
