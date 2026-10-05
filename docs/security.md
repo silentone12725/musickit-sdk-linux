@@ -27,6 +27,7 @@ Do not expose the port beyond loopback (reverse proxy, port forward, container p
 ## Known issues to address before distributing builds
 
 - **Embedded Widevine identity.** `sdk/aacstream/cdm/consts.go` contains a default device private key and client identifier used for AAC/MV key requests. Shipping such credentials in a distributed SDK is a licensing and abuse risk; load them from configuration or an environment-specific file instead.
+- **Proprietary libraries are not in the repository.** Keep `drm/rootfs/` git-ignored; committing Apple's native libraries would redistribute their code.
 - **Vendored wrapper licence.** `drm/native/` is code from a third-party reference wrapper. Confirm its licence terms before redistributing (see [NOTICE.md](../NOTICE.md)).
 - **TLS verification in examples.** `examples/http/client.mjs` disables certificate verification for the loopback connection only; do not copy that into code that talks to other hosts.
 

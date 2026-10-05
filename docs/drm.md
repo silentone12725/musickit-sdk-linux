@@ -28,11 +28,11 @@ The lease manager is created with real callbacks. A lease end or playback error 
 
 ## Runtime layout
 
-The Android libraries are **not distributed**. Provide:
+libhybris ships in this repository (`drm/libhybris-core.so`, `drm/hybris-linker/q.so`; see `drm/vendor/libhybris/README.md`). The Android and Apple Music native libraries are **not distributed**; install them with `scripts/install-android-libs.sh`. The runtime layout is:
 
 ```
-<drm dir>/hybris-linker/q.so              hybris linker plugin
-<drm dir>/rootfs/system/lib64/*.so        Android system + Apple Music libs (must include libc.so)
+<drm dir>/hybris-linker/q.so              hybris linker plugin (vendored)
+<drm dir>/rootfs/system/lib64/*.so        Android system + Apple Music libs (installed by script; must include libc.so)
 <drm dir>/files/                          session data (created at runtime): mpl_db/, MUSIC_TOKEN, …
 ```
 

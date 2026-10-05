@@ -8,17 +8,18 @@
 | gcc, g++, make, GNU as, xxd | `drm/` |
 | OpenSSL and libcurl development files | `drm/` |
 | libvlc development files | `sdk/vlc` (in-process playback) |
-| libhybris-core build and its linker plugin `q.so` | FairPlay (runtime and `drm/` build) |
-| Android rootfs libraries (`libc.so`, Apple Music libs, …) | FairPlay (runtime; not distributed) |
+| Android rootfs libraries (`libc.so`, Apple Music libs, …) | FairPlay (runtime and `drm/` build); **not in the repository**, installed with `scripts/install-android-libs.sh` |
 | ffmpeg, MP4Box (optional) | export, video remux |
 
-Sourcing libhybris and the Android libraries is your responsibility; this repository does not ship them.
+libhybris is **included**: `drm/libhybris-core.so` and `drm/hybris-linker/q.so` are prebuilt, with source provenance, patch, licences and a rebuild script in `drm/vendor/libhybris/`. The Android and Apple Music native libraries are proprietary and are **not committed**; you install them from a source you are entitled to use (below).
 
 ## Steps
 
 ```sh
-# 1. DRM client library
-export HYBRIS_CORE=/path/to/libhybris-core.so
+# 0. Install the Android / Apple Music native libraries into drm/rootfs/system/lib64
+scripts/install-android-libs.sh /path/to/lib64          # or a rootfs dir, or a tarball
+
+# 1. DRM client library (uses the vendored libhybris-core.so)
 make -C drm libdrm_client.so
 
 # 2. Engine binary with real DRM (CGO + native_backend tag)
@@ -29,7 +30,7 @@ cd <dir containing drm/>
 ./dist/musickit-engine --api 20025
 ```
 
-The engine binary finds `libdrm_client.so` next to itself (`$ORIGIN` rpath). `scripts/build-engine.sh` links through a temporary spaceless directory because cgo cannot take `-L` paths containing spaces.
+The engine binary finds `libdrm_client.so` next to itself (`$ORIGIN` rpath). Override `HYBRIS_CORE=<relative path>` to embed your own libhybris build. `scripts/build-engine.sh` links through a temporary spaceless directory because cgo cannot take `-L` paths containing spaces.
 
 ### Without DRM
 

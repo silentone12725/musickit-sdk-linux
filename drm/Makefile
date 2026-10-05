@@ -12,9 +12,9 @@ HYBRIS_CFLAGS = $(CFLAGS) -Wno-clobbered -Wno-maybe-uninitialized -Wno-pedantic
 LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lm -lstdc++ -Wl,--no-as-needed -lcurl -Wl,--as-needed -Wl,-z,relro,-z,now
 LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 
-# libhybris-core.so is embedded into libdrm_client.so; point HYBRIS_CORE at your build
-# of libhybris (see docs/building.md).
-HYBRIS_CORE ?= $(CURDIR)/libhybris-core.so
+# libhybris-core.so (vendored, see vendor/libhybris/README.md) is embedded into libdrm_client.so;
+# override HYBRIS_CORE to use your own build. Relative paths only (the recipe is not space-safe).
+HYBRIS_CORE ?= libhybris-core.so
 
 # Android library directory (embedded into the .so at build time)
 LIB64 = rootfs/system/lib64

@@ -10,8 +10,6 @@ drm/native/*.o
 # Runtime state and secrets — never commit
 drm/files/
 drm/rootfs/
-drm/hybris-linker/
-drm/libhybris-core.so
 config.yaml
 *.enc
 *.key
@@ -20,3 +18,8 @@ config.yaml
 .claude/
 .mcp.json
 go.work.sum
+
+# Vendored libhybris build (open source; see drm/vendor/libhybris/README.md)
+!drm/libhybris-core.so
+!drm/hybris-linker/
+!drm/hybris-linker/q.so
