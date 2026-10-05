@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -236,7 +237,7 @@ func audioFormatFields(codec pipeline.Codec, sampleRate int) (bitRate, channelCo
 
 func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) (*media.Session, error) {
 	if req.MVMaxHeight == 0 {
-		req.MVMaxHeight = 1080 // default: 1080p H.264 (safe for Linux browsers and Electron)
+		req.MVMaxHeight = 1080 // default: 1080p H.264 (safe for Linux/Electron)
 	}
 	if len(req.MVAudioPriorities) == 0 {
 		req.MVAudioPriorities = []string{"audio-atmos", "audio-ac3", "audio-stereo-256"}
@@ -322,7 +323,9 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	// wrapper (port 40020). The downloadKey is sent as an HTTP cookie to the
 	// CDN (Android pattern) — the CDN authorises server-side decryption.
 	// Non-fatal: HLS CBCS path is always the primary; this is an optimisation.
-	if p.acct != nil {
+	// Opt-in (MUSICKIT_MV_PROGRESSIVE=1): the request costs seconds on every open, and nothing
+	// consumes the result unless the native <video> backend is in use.
+	if p.acct != nil && os.Getenv("MUSICKIT_MV_PROGRESSIVE") == "1" {
 		if adamID, parseErr := strconv.ParseUint(req.AssetID, 10, 64); parseErr == nil {
 			progCtx, progCancel := context.WithTimeout(ctx, 5*time.Second)
 			pURL, pKey, pErr := p.acct.GetProgressiveMVURL(progCtx, adamID)

@@ -287,6 +287,10 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 			}
 		}
 	}
+	// fpState is what the initial event reports. stateLoop is already running, so the
+	// wrapper's RUNNING callback may have emitted Ready during init; the initial event
+	// must agree with that instead of resetting the manager to Initializing.
+	fpState := FairPlayInitializing
 	if linkerDir == "" || lib64Dir == "" {
 		log.Printf("[drm] hybris backend: not available (linker=%q lib64=%q)", linkerDir, lib64Dir)
 	} else {
@@ -310,13 +314,18 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 			C.free(unsafe.Pointer(cDevInfoFP))
 			C.free(unsafe.Pointer(cLib64FP))
 			if fpret == 0 {
+				fpState = FairPlayReady
 				log.Printf("[drm] hybris FairPlay init: ok")
 				b.fpOnce.Do(func() { close(b.fpReady) })
+				go b.warmDefaultKeyContext()
 			} else {
 				log.Printf("[drm] hybris FairPlay init: failed (rc=%d) — key exchange may fail", int(fpret))
+				fpState = FairPlayFailed
 			}
-			// Run libCoreFP.so probe in debug mode to log what each export returns
-			C.hybris_corefp_probe()
+			// The probe dumps every libCoreFP export's return value; only useful when debugging.
+			if os.Getenv("MUSICKIT_DEBUG") != "" {
+				C.hybris_corefp_probe()
+			}
 		} else {
 			log.Printf("[drm] hybris backend: not available (vseg rootfs absent or load failed)")
 		}
@@ -333,7 +342,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 				Process:        ProcessRunning,
 				Manager:        ManagerReady,
 				Authentication: AuthLoggedIn,
-				FairPlay:       FairPlayInitializing,
+				FairPlay:       fpState,
 				Session:        SessionValid,
 				Recovery:       RecoveryIdle,
 			},
@@ -523,6 +532,14 @@ func (b *nativeBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) 
 		C.free(unsafe.Pointer(cDK))
 	}
 
+	// An empty downloadKey means the file is itun-encrypted and must be decrypted here.
+	// That needs the sinf data Apple returns with the asset; when the response carried
+	// none, no decryptor exists and the file cannot be played (verified live: the
+	// stored sinf boxes are stripped placeholders).
+	if downloadKey == "" && hasDecryptor == 0 {
+		return "", "", fmt.Errorf("asset %d: progressive file is itun-encrypted but Apple returned no sinf, so it cannot be decrypted", adamID)
+	}
+
 	return url, downloadKey, nil
 }
 
@@ -558,6 +575,31 @@ func (b *nativeBackend) DecryptItunSamples(ctx context.Context, adamID uint64, s
 
 	return decrypted, nil
 }
+
+// defaultKeyURI is the key every ALAC init segment names; its context is shared by all tracks.
+const defaultKeyURI = "skd://itunes.apple.com/P000000000/s1/e1"
+
+// warmDefaultKeyContext opens the shared default key context as soon as FairPlay is up.
+// The first open costs about 5 s inside the Android library; the library caches contexts
+// by (asset, URI), so doing it here means the first track's CBCS dial finds it instead of
+// paying that during playback startup. The context is deliberately kept open.
+func (b *nativeBackend) warmDefaultKeyContext() {
+	leave, err := b.enter(b.currentGen()) // waits for Start to release b.mu
+	if err != nil {
+		return
+	}
+	defer leave()
+	cAssetID := C.CString("0")
+	cMediaURI := C.CString(defaultKeyURI)
+	defer C.free(unsafe.Pointer(cAssetID))
+	defer C.free(unsafe.Pointer(cMediaURI))
+	start := time.Now()
+	ok := C.drm_open_key_context(cAssetID, cMediaURI) != nil
+	log.Printf("[drm] default key context warmed in %s (ok=%v)", time.Since(start).Round(time.Millisecond), ok)
+}
+
+// InProcess marks DialCBCS connections as in-process pipes (see DRMManager.InProcess).
+func (b *nativeBackend) InProcess() bool { return true }
 
 // DialCBCS opens a CBCS decryption connection
 func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
