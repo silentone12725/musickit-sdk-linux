@@ -28,7 +28,7 @@ Do not expose the port beyond loopback (reverse proxy, port forward, container p
 
 - **Widevine device identity is not shipped.** AAC/MV key requests need `device_private_key` and `device_client_id_blob` in `$MUSICKIT_WIDEVINE_DIR` (default `~/.config/musickit-sdk-linux/widevine`). Without them those requests fail with `ErrNoDeviceIdentity`. Keep the directory mode 0700. Earlier commits of this repository contained a default identity; rotate it before making the repository public.
 - **Proprietary libraries are in the repository.** `drm/rootfs/system/lib64` contains Apple's and Android's binaries. Publishing the repository redistributes them; get clearance first, or remove that directory (`git rm -r drm/rootfs/system/lib64`, restore the ignore rule, and have users run `scripts/install-android-libs.sh`). Never commit `drm/rootfs/data`.
-- **Vendored wrapper licence.** `drm/native/` is code from a third-party reference wrapper. Confirm its licence terms before redistributing (see [NOTICE.md](../NOTICE.md)).
+- **Vendored wrapper licence.** `drm/native/` derives from an MIT-licensed wrapper (see [NOTICE.md](../NOTICE.md) and `drm/native/LICENSE.wrapper`); keep the licence files with any redistribution. The `zhaarey/wrapper` lineage it was forked from declares no licence.
 - **TLS verification in examples.** `examples/http/client.mjs` disables certificate verification for the loopback connection only; do not copy that into code that talks to other hosts.
 
 ## Reporting

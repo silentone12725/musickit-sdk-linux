@@ -7,7 +7,6 @@ Work that is queued, in rough priority order.
 1. **Embedded Android libraries break FairPlay** (see [drm.md](drm.md)). Decide whether to remove the embedding path or keep it as diagnostics only; shipping requires bundling `rootfs/system/lib64`.
 2. **Widevine identity in git history.** The identity is no longer in the tree, but earlier commits contain it; rotate it or rewrite history before publishing.
 3. **Bundled proprietary Android libraries.** `drm/rootfs/system/lib64` carries Apple's libraries (Git LFS). Keep the repository private, or ship an installer script instead; see [NOTICE.md](../NOTICE.md).
-4. **Vendored wrapper licence** has not been verified.
 
 ## Resolved
 
@@ -23,6 +22,8 @@ Work that is queued, in rough priority order.
 - **Hard-coded `HiRes`.** It follows `BackendConfig.DisableHiRes` (`MUSICKIT_DISABLE_HIRES=1`). The account token carries no subscription tier, so hi-res is still assumed available otherwise.
 
 - **Embedded Widevine identity.** Removed from `sdk/aacstream/cdm`; loaded from `MUSICKIT_WIDEVINE_DIR` instead.
+
+- **Vendored wrapper licence.** Upstream is MIT; licence texts added under `drm/native/`.
 
 ## Planned
 
