@@ -8,7 +8,8 @@
 |---|---|
 | `drm_client.c/.h`, `drm_types.h` | Clean-room client: HTTPS (with HTTP/2 option), cookie jar, login and 2FA, token handling, license pool, key-context cache, itun decryption entry points, state and auth callbacks |
 | `drm_hybris.c/.h` | Bridge to the Android FairPlay libraries: environment setup, library loading, and delegation of init, key derivation and decrypt to the native wrapper |
-| `embedded_loader.c/.h` | Optional in-memory loader for the Android libraries (see below) |
+| `embedded_loader.c/.h` | Loads the embedded `libhybris-core.so` from a memfd (the Android libraries load from disk) |
+| `stubs/empty_stub.c`, `android-libs.txt` | Empty stand-ins for `libandroid.so` / `libOpenSLES.so`, and the exact list of Android libraries `rootfs/system/lib64` must hold |
 | `native/` | Vendored host-native wrapper in library mode: request-context setup, lease management and recovery, key contexts, exception barrier, shims onto the loader |
 | `build-icu-ndk.sh` | Builds ICU for Android x86_64 (optional; Apple's own ICU libs also work) |
 
@@ -32,19 +33,24 @@ libhybris ships in this repository (`drm/libhybris-core.so`, `drm/hybris-linker/
 
 ```
 <drm dir>/hybris-linker/q.so              hybris linker plugin (vendored)
-<drm dir>/rootfs/system/lib64/*.so        Android system + Apple Music libs (included; must include libc.so)
+<drm dir>/rootfs/system/lib64/*.so        the 25 libraries in drm/android-libs.txt (23 included, 2 generated stubs)
 <drm dir>/files/                          session data (created at runtime): mpl_db/, MUSIC_TOKEN, …
 ```
 
-The engine searches for `lib64` in `$MUSICKIT_DRM_DIR/rootfs/system/lib64`, `<drm dir>/rootfs/system/lib64`, `<parent>/rootfs/system/lib64`, then `~/.config/musickit-sdk-linux/drm/rootfs/system/lib64`, taking the first that contains `libc.so`. The linker directory is the first of those roots that contains `hybris-linker/q.so`. Hybris is configured automatically (`HYBRIS_LINKER_DIR`, `HYBRIS_LD_LIBRARY_PATH`, `HYBRIS_ANDROID_LIB64`).
+The engine searches for `lib64` in `$MUSICKIT_DRM_DIR/rootfs/system/lib64`, `<drm dir>/rootfs/system/lib64`, `<parent>/rootfs/system/lib64`, then `~/.config/musickit-sdk-linux/drm/rootfs/system/lib64`, taking the first that contains `libc.so`, and logs the choice (`[drm] Android libraries: <dir> (N files)`). The linker directory is the first of those roots that contains `hybris-linker/q.so`. Hybris is configured automatically (`HYBRIS_LINKER_DIR`, `HYBRIS_LD_LIBRARY_PATH`, `HYBRIS_ANDROID_LIB64`).
 
-By default the Android libraries load **from disk**. Loading them from in-memory copies (`MUSICKIT_EMBED_LIBS=1`) breaks FairPlay: libraries that locate files relative to their own path make the lease request fail. The embedded blobs remain buildable but are opt-in.
+The Android libraries load **from disk**, never from memory: libraries that locate files relative to their own path make the lease request fail when loaded from a memfd. Only `libhybris-core.so` is embedded in `libdrm_client.so` (about 1 MB in total).
+
+### Which libraries are needed
+
+`drm/android-libs.txt` is the complete list. The Android linker follows every `DT_NEEDED` entry, so a missing library fails init with `library "X" not found`, and anything extra is dead weight. Apple's libraries list `libandroid.so` and `libOpenSLES.so` as dependencies but import **no symbol** from either (`readelf --dyn-syms`), and the real ones pull in the whole Android graphics, binder and media stack (74 more libraries, about 50 MiB). They are therefore empty stubs built from `drm/stubs/empty_stub.c` by `make -C drm android-stubs`. If a future Apple library imports a symbol from one, loading fails with `cannot locate symbol` and the real library has to come back.
 
 ## Failure modes
 
 | Log line | Meaning |
 |---|---|
 | `hybris backend: not available (linker=… lib64=…)` | No usable `q.so` or `lib64` was found |
+| `library "X" not found` | `lib64` is missing a library listed in `drm/android-libs.txt` |
 | `hybris key context unavailable … refusing zero-key fallback` | Key exchange failed; check recovery logs and the session |
 | `[guard] … exception` | A C++ exception from the Android libraries was caught and converted to an error |
 | `key context refused: lease recovery in progress` | Transient; retry after the backoff |

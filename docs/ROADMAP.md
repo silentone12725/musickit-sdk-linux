@@ -4,11 +4,12 @@ Work that is queued, in rough priority order.
 
 ## Known issues
 
-1. **Embedded Android libraries break FairPlay** (see [drm.md](drm.md)). Decide whether to remove the embedding path or keep it as diagnostics only; shipping requires bundling `rootfs/system/lib64`.
-2. **Widevine identity in git history.** The identity is no longer in the tree, but earlier commits contain it; rotate it or rewrite history before publishing.
-3. **Bundled proprietary Android libraries.** `drm/rootfs/system/lib64` carries Apple's libraries (Git LFS). Keep the repository private, or ship an installer script instead; see [NOTICE.md](../NOTICE.md).
+1. **Widevine identity in git history.** The identity is no longer in the tree, but earlier commits contain it; rotate it or rewrite history before publishing.
+2. **Bundled proprietary Android libraries.** `drm/rootfs/system/lib64` carries Apple's libraries (Git LFS). Keep the repository private, or ship an installer script instead; see [NOTICE.md](../NOTICE.md).
 
 ## Resolved
+
+- **Android runtime reduced from 99 libraries to 25, and the embedding removed.** The linker follows every dependency, which pulled in all 99 AOSP libraries (116 MiB) through `libandroid.so` and `libOpenSLES.so`. Apple's libraries import no symbol from either, so they are now empty stubs (`drm/stubs/empty_stub.c`) and `rootfs/system/lib64` is exactly `drm/android-libs.txt` (65 MiB). The opt-in embedding of the Android libraries into `libdrm_client.so` (which broke FairPlay) is gone: only `libhybris-core.so` is embedded, and `libdrm_client.so` went from 64 MB to 1 MB. Verified against the full set with a real session: decrypted ALAC, Atmos and AAC bytes are identical (same SHA-256), via the opt-in `server/playback_live_test.go`.
 
 - **Security and robustness audit.** Fixed: the DRM client's HTTP/1.1 handling (framing, chunked, size cap, timeouts, redirects, retry rules, pooling, SIGPIPE) and RFC 6265 cookie scoping; the local API's per-user connection check and optional token; tool-path and export-output confinement; bounded, cancellable artwork download; slow SSE clients and stale `Last-Event-ID`; library and MV-cache key handling and schema errors; import-time filesystem side effects; session teardown, sliding expiry and per-instance state; DRM backend shutdown ordering; scheduler lifecycle; disk cache eviction and recency; dependencies (`govulncheck` clean).
 

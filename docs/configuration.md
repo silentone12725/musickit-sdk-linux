@@ -31,7 +31,6 @@ The remaining keys (folder templates, tagging, conversion, lyrics format) apply 
 | Variable | Effect |
 |---|---|
 | `MUSICKIT_DRM_DIR` | Directory containing `rootfs/system/lib64` and `hybris-linker/`; overrides the search |
-| `MUSICKIT_EMBED_LIBS=1` | Load the embedded Android libraries from memory (breaks FairPlay; diagnostics only) |
 | `MUSICKIT_DISABLE_HIRES=1` | Report `hiRes: false` in `/capabilities` and the DRM snapshot (the account token carries no tier, so hi-res is otherwise assumed once FairPlay is ready) |
 | `MUSICKIT_TLS_PINS` | Comma-separated base64 SPKI SHA-256 pins for the DRM client's HTTPS connections; when set, a handshake succeeds only if some certificate in the served chain matches |
 | `MUSICKIT_WIDEVINE_DIR` | Directory holding `device_private_key` and `device_client_id_blob` (default `~/.config/musickit-sdk-linux/widevine`); required for AAC/MV key requests |
