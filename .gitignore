@@ -9,7 +9,11 @@ drm/native/*.o
 
 # Runtime state and secrets — never commit
 drm/files/
-drm/rootfs/
+drm/rootfs/*
+!drm/rootfs/system/
+drm/rootfs/system/*
+!drm/rootfs/system/lib64/
+!drm/rootfs/system/lib64/*.so
 config.yaml
 *.enc
 *.key
