@@ -1,0 +1,49 @@
+# Configuration
+
+## Command line
+
+```
+musickit-engine --api <port>
+```
+
+`--api` starts the HTTP server on `127.0.0.1:<port>`. Without it the binary prints usage and exits.
+
+## config.yaml
+
+Read from the working directory. If it is missing, built-in defaults are used and a warning is logged. `server/config.yaml.example` lists every key; the ones that matter in API mode:
+
+| Key | Description |
+|---|---|
+| `storefront` | Two-letter default storefront (default `us`) |
+| `media-user-token`, `authorization-token` | Optional token overrides |
+| `language` | Default language |
+| `drm-binary-path` | Marker path whose directory is the DRM directory (default: `./drm`) |
+| `drm-base-dir` | DRM session directory (default: `<drm dir>/files`) |
+| `stream-cache-size` | Cache size in MB (0 = unlimited) |
+| `max-memory-limit` | Memory limit in MB |
+| `export-throttle-floor-kbps` | Minimum export rate while music is playing |
+| `alac-max`, `atmos-max`, `aac-type`, `mv-max`, `mv-audio-type` | Quality preferences |
+
+The remaining keys (folder templates, tagging, conversion, lyrics format) apply to the export pipeline.
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `MUSICKIT_DRM_DIR` | Directory containing `rootfs/system/lib64` and `hybris-linker/`; overrides the search |
+| `MUSICKIT_EMBED_LIBS=1` | Load the embedded Android libraries from memory (breaks FairPlay; diagnostics only) |
+| `MUSICKIT_DEBUG=1` | Register `/debug/pprof/*` and verbose AAC debug output. Heap dumps can expose key material |
+| `MUSICKIT_CAVERN` | Path to `CavernPipeServer` for lossless Atmos binaural rendering |
+
+## Paths
+
+| Path | Content |
+|---|---|
+| `<drm dir>/files/` | DRM session: `mpl_db/`, `MUSIC_TOKEN`, `STOREFRONT_ID` (sensitive; never commit) |
+| `<drm dir>/files/engine-session.lock` | Single-instance lock |
+| `~/.cache/musickit-sdk-linux/playback/` | Cached lossless tracks (`{assetId}-alac.m4a`) |
+| `~/.cache/musickit-sdk-linux/library.enc`, `library.key` | Encrypted library cache and its key |
+| `~/.cache/engine/segments` | AAC segment cache |
+| `~/.config/musickit-sdk-linux/drm/` | Optional per-user DRM directory (searched for `lib64` and `q.so`) |
+
+Clear caches with `DELETE /api/v1/cache/playback?what=persistent|prewarm|segments`.

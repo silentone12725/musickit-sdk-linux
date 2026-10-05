@@ -1,0 +1,22 @@
+# Build output
+/dist/
+*.o
+*.so
+*.a
+drm/embedded_blobs/
+drm/corefp_probe
+drm/native/*.o
+
+# Runtime state and secrets — never commit
+drm/files/
+drm/rootfs/
+drm/hybris-linker/
+drm/libhybris-core.so
+config.yaml
+*.enc
+*.key
+
+# Local tooling
+.claude/
+.mcp.json
+go.work.sum

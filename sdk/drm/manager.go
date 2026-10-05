@@ -1,0 +1,566 @@
+package drm
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// crashResetWindow: a backend that stays up this long after a start is healthy,
+// so the next crash starts a fresh MaxCrashRestarts budget (the budget counts
+// consecutive crash-loops, not crashes over the process lifetime).
+const crashResetWindow = 2 * time.Minute
+
+// DefaultRestartPolicy is used when no policy is specified.
+var DefaultRestartPolicy = RestartPolicy{
+	MaxCrashRestarts: 5,
+	RestartBackoff:   []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second},
+	StartupTimeout:   60 * time.Second,
+	AuthTimeout:      120 * time.Second,
+}
+
+// RestartPolicy controls how DRMManager responds to backend crashes.
+type RestartPolicy struct {
+	// MaxCrashRestarts is the maximum number of consecutive crash restarts
+	// before DRMManager enters ManagerFailed. 0 = unlimited.
+	MaxCrashRestarts int
+
+	// RestartBackoff is the wait between successive crash restarts.
+	// Indexed by crash count; last entry is reused for all subsequent crashes.
+	RestartBackoff []time.Duration
+
+	// StartupTimeout is how long Start() waits for the backend to reach
+	// ProcessRunning before returning an error.
+	StartupTimeout time.Duration
+
+	// AuthTimeout is how long Login() waits for the backend to reach
+	// FairPlayReady after authentication completes.
+	AuthTimeout time.Duration
+}
+
+// EventSink receives DRM events to forward to the SSE bus.
+// The apiserver implements this by calling eventBus.emit("drm", snapshot).
+type EventSink func(snapshot DRMSnapshot)
+
+// ── NativeBackend capability status ──────────────────────────────────────────
+//
+//	Capability        Status
+//	──────────────── ───────
+//	Authenticate     ✓ verified
+//	Session reuse    ✓ verified
+//	GetAccount       ✓ verified
+//	GetM3U8          ✓ verified
+//	CBCS decrypt     ✓ verified
+//	ALAC playback    ✓ verified
+//	Atmos playback   ✓ verified
+//	Crash recovery   ✓ verified
+//	Fresh auth (2FA) ✓ verified
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DRMManager is the engine's DRM coordinator. It:
+//   - Owns the DRMBackend lifecycle (start, stop, restart, crash recovery)
+//   - Owns the authentication flow (Login, 2FA, Logout)
+//   - Owns the SessionManager
+//   - Implements DRMProvider for the playback layer
+//   - Forwards DRMEvents to the SSE bus via EventSink
+//
+// DRMManager is the only type in the engine that knows about the DRMBackend.
+// PlaybackManager only sees DRMProvider.
+type DRMManager struct {
+	backend  DRMBackend
+	session  *SessionManager
+	auth     *AuthCoordinator
+	sink     EventSink
+	cfg      BackendConfig
+	policy   RestartPolicy
+	snapshot DRMSnapshot
+	mu       sync.RWMutex
+
+	// crash restart state
+	crashCount int
+	restartMu  sync.Mutex // serialises concurrent handleCrash goroutines
+	// emitMu is held from snapshot copy to sink so events reach clients in the
+	// order the state changed; copying under mu but emitting after unlocking
+	// let two goroutines deliver an older snapshot after a newer one.
+	emitMu       sync.Mutex
+	lastStart    atomic.Int64 // UnixNano of the last successful backend start
+	shutdownCtx  context.Context
+	shutdownStop context.CancelFunc
+
+	// recoveryGate is a channel that is CLOSED when the DRM backend is not in
+	// active lease recovery, and OPEN (not yet closed) while recovery is in
+	// progress. Decrypt() selects on it to pause until recovery completes rather
+	// than propagating a transient connection-refused error.
+	//
+	// Invariant (held under mu): gate is closed when Recovery ∉ {Scheduled, Refreshing}.
+	// ponytail: per-recovery chan, reset on each transition; upgrade to singleflight
+	//           if >1 concurrent Decrypt waiter becomes a concern.
+	recoveryGate chan struct{}
+}
+
+// NewDRMManager creates a DRMManager with the given backend.
+// sink receives every DRMSnapshot and forwards it to SSE.
+func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, cfg BackendConfig, policy RestartPolicy) *DRMManager {
+	gate := make(chan struct{})
+	close(gate) // start closed: no recovery in progress
+	shutCtx, shutStop := context.WithCancel(context.Background())
+	m := &DRMManager{
+		backend:      backend,
+		session:      session,
+		cfg:          cfg,
+		policy:       policy,
+		sink:         sink,
+		recoveryGate: gate,
+		shutdownCtx:  shutCtx,
+		shutdownStop: shutStop,
+	}
+	m.auth = NewAuthCoordinator(func(snap DRMSnapshot) {
+		m.mergeAndEmit(snap)
+	})
+	backend.SetAuthSource(m.auth)
+	m.setManagerState(ManagerReady)
+	// Reflect session state at startup so GET /api/v1/drm/status shows the
+	// correct state immediately — before any playback request fires ensureRunning.
+	if session.HasSession() {
+		m.snapshot.State.Session = SessionValid
+		m.snapshot.State.Authentication = AuthLoggedIn
+	} else {
+		m.snapshot.State.Session = SessionEmpty
+		m.snapshot.State.Authentication = AuthLoggedOut
+	}
+	go m.watchEvents()
+	return m
+}
+
+// ── DRMProvider implementation ────────────────────────────────────────────────
+
+// recoveryActive reports whether lease recovery is in progress and returns the
+// current gate channel. Callers select on the gate to wake when recovery ends.
+func (m *DRMManager) recoveryActive() (bool, chan struct{}) {
+	m.mu.RLock()
+	s := m.snapshot.State.Recovery
+	gate := m.recoveryGate
+	m.mu.RUnlock()
+	return s == RecoveryRefreshing || s == RecoveryScheduled, gate
+}
+
+// Decrypt auto-starts the backend if a session exists, then decrypts.
+// If lease recovery is active when the backend call fails, Decrypt waits up
+// to 15 s for recovery to complete and retries once — so active MV playback
+// can buffer through a LEASE_END event without aborting.
+func (m *DRMManager) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
+	if err := m.ensureRunning(ctx); err != nil {
+		return DecryptResponse{}, err
+	}
+	resp, err := m.backend.Decrypt(ctx, req)
+	if err != nil {
+		if active, gate := m.recoveryActive(); active {
+			waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			select {
+			case <-gate:
+				// Recovery complete — retry the decrypt once.
+				resp, err = m.backend.Decrypt(waitCtx, req)
+			case <-waitCtx.Done():
+				err = fmt.Errorf("drm decrypt: timed out waiting for lease recovery: %w", waitCtx.Err())
+			}
+		}
+	}
+	if err == nil {
+		m.session.RecordSuccess()
+	}
+	return resp, err
+}
+
+// GetM3U8 auto-starts the backend if a session exists.
+func (m *DRMManager) GetM3U8(ctx context.Context, adamID uint64) (string, error) {
+	if err := m.ensureRunning(ctx); err != nil {
+		return "", err
+	}
+	url, err := m.backend.GetM3U8(ctx, adamID)
+	if err == nil {
+		m.session.RecordSuccess()
+	}
+	return url, err
+}
+
+// GetProgressiveMVURL auto-starts the backend and fetches a progressive MV URL
+// and the associated downloadKey (may be empty) via port 40020.
+func (m *DRMManager) GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error) {
+	if err = m.ensureRunning(ctx); err != nil {
+		return "", "", err
+	}
+	url, downloadKey, err = m.backend.GetProgressiveMVURL(ctx, adamID)
+	if err == nil {
+		m.session.RecordSuccess()
+	}
+	return url, downloadKey, err
+}
+
+// DecryptItunSamples auto-starts the backend and decrypts itun-encrypted
+// samples via port 50020. The decryptor must have been initialized by a prior
+// GetProgressiveMVURL call for the same adamID.
+func (m *DRMManager) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+	if err := m.ensureRunning(ctx); err != nil {
+		return nil, err
+	}
+	return m.backend.DecryptItunSamples(ctx, adamID, samples)
+}
+
+// GetAccount auto-starts the backend if a session exists.
+func (m *DRMManager) GetAccount(ctx context.Context) (AccountInfo, error) {
+	if err := m.ensureRunning(ctx); err != nil {
+		return AccountInfo{}, err
+	}
+	info, err := m.backend.GetAccount(ctx)
+	if err == nil {
+		m.session.RecordSuccess()
+	}
+	return info, err
+}
+
+// ensureRunning auto-starts the backend (session reuse path) if not running.
+// Returns ErrNotAuthenticated if no session exists.
+// Never authenticates — that is Authenticate()'s job.
+func (m *DRMManager) ensureRunning(ctx context.Context) error {
+	if m.backend.Running() {
+		return nil
+	}
+	if !m.session.HasSession() {
+		return ErrNotAuthenticated
+	}
+	startCtx, cancel := context.WithTimeout(ctx, m.policy.StartupTimeout)
+	defer cancel()
+
+	if err := m.backend.Start(startCtx, m.cfg); err != nil {
+		// A concurrent ensureRunning / handleCrash goroutine may have started
+		// the backend between our Running() check and this call — that is fine.
+		if !m.backend.Running() {
+			return err
+		}
+	}
+	m.lastStart.Store(time.Now().UnixNano())
+	// Session DB is present — reflect that immediately so the UI shows the
+	// correct state without waiting for a wrapper-emitted event.
+	m.mergeAndEmit(DRMSnapshot{
+		State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+		Message: "session reuse — mpl_db present",
+	})
+	return nil
+}
+
+// ── Authentication intent API ─────────────────────────────────────────────────
+
+// Login stores credentials and calls backend.Start(). Authentication is
+// challenge-driven: if the wrapper needs credentials, it fires
+// AuthSource.Challenge(ChallengeCredentials), and AuthCoordinator returns the
+// stored values immediately. The manager never decides "should we authenticate?"
+// — that belongs to the backend and ultimately to storeservicescore.
+//
+// Both session-reuse and fresh-login paths use Start(). The difference is
+// purely in whether credentials are stored in AuthCoordinator:
+//   - HasSession(): no credentials needed; wrapper uses existing mpl_db.
+//   - !HasSession(): credentials are stored; wrapper's credentialHandler
+//     fires Challenge(ChallengeCredentials) and AuthCoordinator replies.
+func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error {
+	m.auth.SetCredentials(creds) // stored in AuthCoordinator; used if challenged
+	m.setManagerState(ManagerInitializing)
+
+	loginCtx, cancel := context.WithTimeout(ctx, m.policy.AuthTimeout)
+	defer cancel()
+
+	// Stop any running backend first so the fresh Start below gets a clean slate.
+	// This also kills any adopted wrapper (one we didn't launch ourselves) so its
+	// port is released before we try to start a fresh process with --login.
+	if m.backend.Running() {
+		_ = m.backend.Stop()
+	}
+	// Pass credentials in BackendConfig for this one Start() call.
+	// NOT stored in m.cfg — crash restarts use session-reuse (empty credentials).
+	loginCfg := m.cfg
+	loginCfg.Credentials = creds
+	authErr := m.backend.Start(loginCtx, loginCfg)
+	if authErr != nil {
+		m.setManagerState(ManagerFailed)
+		return fmt.Errorf("authenticate: %w", authErr)
+	}
+	m.lastStart.Store(time.Now().UnixNano())
+	// If a session DB already exists the wrapper resumes it silently.
+	// Reflect that immediately so the UI shows the correct state.
+	if m.session.HasSession() {
+		m.mergeAndEmit(DRMSnapshot{
+			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			Message: "session reuse — mpl_db present",
+		})
+	}
+	m.setManagerState(ManagerReady)
+	return nil
+}
+
+// SubmitChallenge delivers a challenge reply (2FA code, device approval, etc.)
+// from the browser. Call this after receiving a DRM SSE event with
+// Authentication == AuthChallenging.
+func (m *DRMManager) SubmitChallenge(_ context.Context, reply string) error {
+	return m.auth.SubmitReply(reply)
+}
+
+// Logout stops the backend and clears the session.
+// Stop() is sufficient — NativeBackend holds no persistent process state.
+// SessionManager.ClearSession removes the persisted mpl_db and derived files.
+func (m *DRMManager) Logout(ctx context.Context) error {
+	m.setManagerState(ManagerShuttingDown)
+	if err := m.backend.Stop(); err != nil {
+		return fmt.Errorf("logout stop: %w", err)
+	}
+	if err := m.session.ClearSession(); err != nil {
+		return fmt.Errorf("clear session: %w", err)
+	}
+	// emitMu only around copy+send: holding it across backend.Stop would
+	// deadlock with a login blocked on a 2FA challenge (Stop waits for Start,
+	// Start waits for the challenge, the challenge's emit waits for emitMu).
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+	m.mu.Lock()
+	m.snapshot.State = DRMState{
+		Manager:        ManagerReady,
+		Process:        ProcessStopped,
+		Authentication: AuthLoggedOut,
+		FairPlay:       FairPlayUnknown,
+		Session:        SessionEmpty,
+		Recovery:       RecoveryUnknown,
+	}
+	m.snapshot.Capabilities = CapabilityState{}
+	// Recovery is now Unknown: release any Decrypt waiters parked on the gate
+	// (mergeAndEmit only does this on a recovery→idle transition).
+	openGate := m.recoveryGate
+	closed := make(chan struct{})
+	close(closed)
+	m.recoveryGate = closed
+	snap := m.snapshot
+	m.mu.Unlock()
+
+	select {
+	case <-openGate:
+	default:
+		close(openGate)
+	}
+	if m.sink != nil {
+		m.sink(snap)
+	}
+	return nil
+}
+
+// ClearSession clears the session without stopping the backend.
+// The backend must be stopped before calling this, otherwise storeservicescore
+// will re-create the session files.
+func (m *DRMManager) ClearSession() error {
+	return m.session.ClearSession()
+}
+
+// DialCBCS implements fairplay.CBCSDialer. It auto-starts the backend if a
+// valid session exists, then opens one CBCS decryption connection.
+// Called by fairplay.CBCSSource for each ALAC or Atmos stream attempt.
+func (m *DRMManager) DialCBCS(ctx context.Context) (net.Conn, error) {
+	if err := m.ensureRunning(ctx); err != nil {
+		return nil, err
+	}
+	return m.backend.DialCBCS(ctx)
+}
+
+// Shutdown stops the backend process without clearing the session.
+// Call this on clean server exit so the session DB persists for the next start.
+// Unlike Logout, Shutdown does not remove mpl_db or any session files.
+func (m *DRMManager) Shutdown() {
+	m.shutdownStop() // cancel any in-progress handleCrash sleep or restart
+	m.setManagerState(ManagerShuttingDown)
+	if m.backend.Running() {
+		_ = m.backend.Stop()
+	}
+}
+
+// Status returns the current DRM snapshot.
+func (m *DRMManager) Status() DRMSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.snapshot
+}
+
+// watchEvents drains the backend event channel and updates the DRMManager
+// state accordingly. Handles crash detection and restart policy.
+func (m *DRMManager) watchEvents() {
+	for ev := range m.backend.Events() {
+		snap := ev.Snapshot
+
+		// Crash detection: backend stopped unexpectedly → apply restart policy.
+		// Skip when IntentionalStop is set — the stop was planned (e.g. a
+		// credential-triggered re-init). Calling handleCrash in that case
+		// races the relaunch.
+		if snap.State.Process == ProcessStopped && !ev.Intentional {
+			go m.handleCrash()
+		}
+
+		// mergeAndEmit applies all non-zero fields atomically under one lock and
+		// derives capabilities from the merged state, so the emitted snapshot
+		// is self-consistent (updating capabilities afterwards sent the
+		// FairPlay-ready event itself with lossless=false).
+		m.mergeAndEmit(snap)
+	}
+}
+
+func (m *DRMManager) handleCrash() {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+
+	// If a concurrent handleCrash goroutine already restarted the backend,
+	// or Authenticate() started a fresh one, there is nothing to do.
+	if m.backend.Running() {
+		return
+	}
+
+	// crashCount is safe to access here without m.mu: restartMu serialises all
+	// handleCrash goroutines, so only one can reach this point at a time.
+	if last := m.lastStart.Load(); last != 0 && time.Since(time.Unix(0, last)) > crashResetWindow {
+		m.crashCount = 0 // healthy run since the last start: not a crash loop
+	}
+	count := m.crashCount
+	m.crashCount++
+
+	if m.policy.MaxCrashRestarts > 0 && count >= m.policy.MaxCrashRestarts {
+		m.setManagerState(ManagerFailed)
+		m.mergeAndEmit(DRMSnapshot{
+			State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed},
+			Message: fmt.Sprintf("backend crashed %d times; giving up", count),
+		})
+		return
+	}
+
+	idx := count
+	if idx >= len(m.policy.RestartBackoff) {
+		idx = len(m.policy.RestartBackoff) - 1
+	}
+	delay := m.policy.RestartBackoff[idx]
+
+	m.mergeAndEmit(DRMSnapshot{
+		State:   DRMState{Process: ProcessStopped},
+		Message: fmt.Sprintf("backend crashed (attempt %d); restarting in %v", count+1, delay),
+	})
+
+	select {
+	case <-m.shutdownCtx.Done():
+		return // server is shutting down; abort the restart
+	case <-time.After(delay):
+	}
+
+	ctx, cancel := context.WithTimeout(m.shutdownCtx, m.policy.StartupTimeout)
+	defer cancel()
+
+	if err := m.backend.Start(ctx, m.cfg); err != nil {
+		m.mergeAndEmit(DRMSnapshot{
+			State:   DRMState{Process: ProcessFailed},
+			Message: fmt.Sprintf("restart failed: %v", err),
+		})
+		return
+	}
+	m.lastStart.Store(time.Now().UnixNano())
+}
+
+// ── State helpers ─────────────────────────────────────────────────────────────
+
+func (m *DRMManager) setManagerState(s ManagerState) {
+	m.mu.Lock()
+	m.snapshot.State.Manager = s
+	m.mu.Unlock()
+}
+
+// mergeAndEmit merges non-zero fields from snap into the current snapshot,
+// updates the timestamp, and forwards to the EventSink.
+func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+	m.mu.Lock()
+	if snap.State.Manager != 0 {
+		m.snapshot.State.Manager = snap.State.Manager
+	}
+	if snap.State.Process != 0 {
+		m.snapshot.State.Process = snap.State.Process
+	}
+	if snap.State.Authentication != 0 {
+		m.snapshot.State.Authentication = snap.State.Authentication
+	}
+	if snap.State.FairPlay != 0 {
+		m.snapshot.State.FairPlay = snap.State.FairPlay
+	}
+	if snap.State.Session != 0 {
+		m.snapshot.State.Session = snap.State.Session
+	}
+	if snap.Challenge != nil {
+		m.snapshot.Challenge = snap.Challenge
+	} else if snap.State.Authentication != AuthChallenging {
+		m.snapshot.Challenge = nil
+	}
+
+	// Recovery gate: manage the channel that Decrypt() waits on.
+	// RecoveryUnknown (0) is treated as "not recovering" so the gate stays closed.
+	prevRecovery := m.snapshot.State.Recovery
+	if snap.State.Recovery != 0 {
+		m.snapshot.State.Recovery = snap.State.Recovery
+	}
+	newRecovery := m.snapshot.State.Recovery
+
+	var closeGate chan struct{}
+	if prevRecovery != newRecovery {
+		inRecovery := func(s RecoveryState) bool {
+			return s == RecoveryRefreshing || s == RecoveryScheduled
+		}
+		switch {
+		case !inRecovery(prevRecovery) && inRecovery(newRecovery):
+			// Recovery starting — open a new gate (block Decrypt waiters).
+			select {
+			case <-m.recoveryGate:
+				m.recoveryGate = make(chan struct{}) // prev was closed, open a fresh one
+			default:
+				// Gate already open; reuse it.
+			}
+		case inRecovery(prevRecovery) && !inRecovery(newRecovery):
+			// Recovery ending — capture gate to close after unlock (wake all waiters).
+			closeGate = m.recoveryGate
+			// Replace with a pre-closed gate for the next non-recovery period.
+			next := make(chan struct{})
+			close(next)
+			m.recoveryGate = next
+		}
+	}
+
+	if m.snapshot.State.FairPlay == FairPlayReady {
+		// Capabilities are derived at the snapshot level, not inside State.
+		m.snapshot.Capabilities = CapabilityState{
+			CBCS:  true,
+			ALAC:  true,
+			Atmos: true,
+			HiRes: true, // TODO: verify subscription tier via GetAccount
+		}
+	}
+
+	m.snapshot.Timestamp = time.Now()
+	m.snapshot.Message = snap.Message
+	out := m.snapshot
+	m.mu.Unlock()
+
+	// Close outside the lock so Decrypt waiters don't re-enter mu.
+	if closeGate != nil {
+		select {
+		case <-closeGate:
+			// Already closed (e.g., duplicate RUNNING event); nothing to do.
+		default:
+			close(closeGate)
+		}
+	}
+
+	if m.sink != nil {
+		m.sink(out)
+	}
+}
