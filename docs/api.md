@@ -119,36 +119,99 @@ See [recommendations.md](recommendations.md).
 
 ## Library
 
-An AES-256-GCM encrypted local cache of the user's library.
+An AES-256-GCM encrypted local cache of the listener's library. The engine does not fetch the library itself: the client (which holds the user's MusicKit session) downloads it and hands it over with `/library/ingest`.
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/library/token` | `{"musicUserToken","developerToken"}` — hand the engine the listener's tokens (max 16 KB). Required for `/recommendations*` |
-| POST | `/library/sync` | Sync from Apple |
-| POST | `/library/ingest` | Ingest a payload produced by a frontend |
-| GET | `/library/status` | Cache status |
-| GET | `/library/playlists` | Playlists |
-| GET | `/library/playlists/{id}/tracks` | Tracks of a library playlist |
-| GET | `/library/albums/{id}/tracks` | Tracks of a library album |
+| POST | `/library/token` | Hand the engine the listener's tokens. Body: `{"musicUserToken": "…", "developerToken": "…"}` (developer token optional; max 16 KB). Returns `{"ok": true}`. Needed for `/recommendations*` and live library fetches |
+| POST | `/library/ingest` | Replace the cache with a payload (max 100 MB). Returns `{"songs","albums","playlists","syncedAt"}` |
+| POST | `/library/sync` | **Deprecated**: always `410 Gone`. Use `/library/ingest` |
+| GET | `/library/status` | `{"songs","albums","playlists","syncedAt","needsSync"}`; `503` if the store is unavailable |
+| GET | `/library/playlists` | `{"playlists": [...]}` from the cache |
+| GET | `/library/playlists/{id}/tracks` | `{"tracks": [{"lid","cid"}], "cached": bool}`. `lid` is the library song ID, `cid` the catalog ID. On a cache miss with tokens available, the engine fetches live and caches the result; with no tokens it returns an empty list and `cached:false` |
+| GET | `/library/albums/{id}/tracks` | `{"tracks": [{"lid","cid"}], "cached": true}` from the local database. `l.` is prefixed to the ID if missing |
+
+`POST /library/ingest` body (items follow Apple Music API resource objects):
+
+```json
+{
+  "songs": [ { "id": "i.…", "type": "library-songs", "attributes": { } } ],
+  "albums": [ ],
+  "playlists": [ ],
+  "playlistTracks": { "<playlistId>": [ ] },
+  "revision": "<opaque token for delta sync>"
+}
+```
 
 ## Cache
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/cache/stats` | Statistics |
-| PUT | `/cache/config` | Change cache limits |
-| DELETE | `/cache/playback?what=` | `persistent` (cached songs), `prewarm`, `segments`, or empty for all |
-| GET / PUT / DELETE | `/cache/mv` | Music-video segment cache: info, configure, clear |
+| GET | `/cache/stats` | `{"persistent": {"available","sizeBytes","limitBytes","ttlDays","count"}, "prewarm": {"entries","sizeBytes","limitBytes"}}`. Defaults shown when no limit is set: 500 MB persistent, 1 GB prewarm |
+| PUT | `/cache/config` | Body (max 4 KB): `{"prewarmLimitMB": N, "persistLimitMB": N, "persistTTLDays": N}`; omitted fields are unchanged. Returns the effective config |
+| DELETE | `/cache/playback?what=` | `persistent` (cached songs), `prewarm`, `segments`, or empty for all. `204` |
+| GET | `/cache/mv` | `{"enabled","maxBytes","sizeBytes","quality"}` for the music-video cache |
+| PUT | `/cache/mv` | Body (max 4 KB): `{"enabled": bool, "maxBytes": N}`, both optional. Returns the same shape as `GET` |
+| DELETE | `/cache/mv` | Clear the music-video cache. `204` |
 
 ## Export
 
+Exports are queued jobs; progress is also pushed as `export` SSE events.
+
 | Method | Path | Description |
 |---|---|---|
-| POST | `/export` | Enqueue a job |
-| GET | `/export` | List jobs |
-| GET / DELETE | `/export/{id}` | Status / cancel |
-| POST | `/export/{id}/retry` | Retry a failed or cancelled job |
-| POST | `/export/{id}/priority` | Reprioritise |
+| POST | `/export` | Enqueue a job (max 64 KB). `202` with the job. `401` if no developer token or media token is available (supply `token` and `mut` in the body, or start playback first). `400` for an invalid request |
+| GET | `/export` | List all jobs |
+| GET | `/export/{id}` | One job; `404` if unknown |
+| DELETE | `/export/{id}` | Cancel; `204`, or `404` |
+| POST | `/export/{id}/retry` | Retry a `failed` or `cancelled` job; `202` with the job, `400` if not retryable, `404`, `401` without tokens |
+| POST | `/export/{id}/priority` | Body: `{"priority": N}`. Higher runs sooner, FIFO among equals. `200` with the job, `404` unknown, `409` if already running or finished |
+
+`POST /export` body:
+
+```json
+{
+  "assetId": "1488408568",
+  "storefront": "us",
+  "token": "<optional developer JWT>",
+  "mut": "<optional Music-User-Token>",
+  "language": "en-US",
+  "capabilities": { "lossless": true, "atmos": false, "video": false,
+                    "playlist": false, "libraryPlaylist": false },
+  "mvMaxHeight": 0,
+  "outputDir": "/home/me/Music",
+  "filenameTemplate": "{album_artist}/{album}/{track_number:02d} - {title}",
+  "options": {
+    "embedArtwork": true, "artworkSize": 3000,
+    "embedLyrics": true, "lrcFormat": "lrc", "lrcType": "lyrics", "saveLrcSidecar": false,
+    "overwritePolicy": "skip",
+    "convertToFlac": false, "keepOriginal": false,
+    "explicitChoice": "[E]", "cleanChoice": "[C]", "masterChoice": "[M]"
+  },
+  "hintTitle": "", "hintArtist": "", "hintArtwork": "",
+  "priority": 0
+}
+```
+
+- `capabilities.playlist` expands a playlist into one job per track (children inherit `priority`); `libraryPlaylist` uses the library API for `p.…` IDs.
+- `overwritePolicy`: `skip` (default), `overwrite` or `rename`. `lrcFormat`: `lrc` or `ttml`. `lrcType`: `lyrics` or `syllable-lyrics`.
+- Filename template variables: `{title}`, `{artist}`, `{album_artist}`, `{album}`, `{track_number}`, `{track_number:02d}`, `{disc_number}`, `{year}`, `{genre}`, `{codec}`, `{ext}`.
+- `hint*` fields only let a UI show the job row before the catalog lookup finishes.
+
+A job looks like:
+
+```json
+{
+  "jobId": "…", "assetId": "…", "phase": "downloading", "percent": 42,
+  "queuePos": 7, "queueIndex": 0, "priority": 0,
+  "title": "…", "artistName": "…", "artworkUrl": "…",
+  "bytesDone": 0, "bytesTotal": 0, "output": "", "error": "",
+  "source": "network", "limitBps": null, "throttled": false,
+  "createdAt": "…", "updatedAt": "…"
+}
+```
+
+`phase` is one of `queued`, `resolving`, `downloading`, `tagging`, `moving`, `done`, `failed`, `cancelled`. `source` is `cache`, `playback` or `network`: where the bytes came from.
 
 ## Errors
 
