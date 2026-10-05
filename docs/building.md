@@ -53,3 +53,19 @@ make fmt      # lists unformatted files
 ### Optional: ICU
 
 `drm/build-icu-ndk.sh` builds ICU 68.2 for Android x86_64 in Docker (NDK r23b) and strips unused locales with `icupkg`. Apple's original ICU libraries are smaller and work out of the box.
+
+## Cleaning
+
+A build leaves intermediates behind; the DRM library alone generates about 400 MB of embedded-blob sources.
+
+```sh
+scripts/clean.sh --dry-run   # list what would go
+scripts/clean.sh             # objects, embedded blobs, probe/test binaries, stray go build output
+scripts/clean.sh --all       # also drm/libdrm_client.so and dist/
+make clean                   # the same intermediates, through make
+make distclean               # everything built
+make release                 # build the real engine, then drop the intermediates
+make -C drm release          # build only the library, then drop what it was built from
+```
+
+The next `make` regenerates the blobs, which takes a minute or two. `drm/files` (an Apple session), `drm/rootfs` and the vendored libhybris are never removed.

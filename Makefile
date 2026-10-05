@@ -5,7 +5,7 @@
 
 DIST ?= dist
 
-.PHONY: all drm engine test vet fmt clean
+.PHONY: all drm engine test vet fmt clean distclean release
 all: engine
 
 drm:
@@ -27,6 +27,15 @@ vet:
 fmt:
 	gofmt -l sdk server examples
 
+# Intermediates only: objects, embedded-blob sources (~400 MB), probe/test binaries.
 clean:
+	$(MAKE) -C drm clean-objs
+
+# Everything built, including drm/libdrm_client.so and $(DIST). scripts/clean.sh does the
+# same with --dry-run and reporting.
+distclean: clean
 	$(MAKE) -C drm clean
 	rm -rf $(DIST)
+
+# Real engine, then drop the build intermediates.
+release: engine clean
