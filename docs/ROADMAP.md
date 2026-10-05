@@ -6,10 +6,8 @@ Work that is queued, in rough priority order.
 
 1. **Embedded Android libraries break FairPlay** (see [drm.md](drm.md)). Decide whether to remove the embedding path or keep it as diagnostics only; shipping requires bundling `rootfs/system/lib64`.
 2. **Embedded Widevine identity** in `sdk/aacstream/cdm/consts.go` (see [security.md](security.md)). Move to configuration before distributing.
-3. **No certificate pinning** for the DRM client's HTTPS requests (TODO in `drm/drm_client.c`).
-4. **`HiRes: true` is hardcoded** in `sdk/drm/manager.go`; it should come from configuration.
-5. **Bundled proprietary Android libraries.** `drm/rootfs/system/lib64` carries Apple's libraries (Git LFS). Keep the repository private, or ship an installer script instead; see [NOTICE.md](../NOTICE.md).
-6. **Vendored wrapper licence** has not been verified.
+3. **Bundled proprietary Android libraries.** `drm/rootfs/system/lib64` carries Apple's libraries (Git LFS). Keep the repository private, or ship an installer script instead; see [NOTICE.md](../NOTICE.md).
+4. **Vendored wrapper licence** has not been verified.
 
 ## Resolved
 
@@ -20,6 +18,9 @@ Work that is queued, in rough priority order.
 - **OpenAPI coverage.** `api/openapi.json` describes all 69 routes, and `server/openapi_test.go` fails when a registered route is missing from the spec.
 - **Vendored libhybris and bundled Android libraries.** The SDK builds and runs host-native FairPlay from a clean clone (libraries tracked with Git LFS).
 - **Documentation accuracy.** `api.md` and `configuration.md` were checked against the handlers (for example `/library/sync` returns 410, VLC routes return 503 when unavailable).
+
+- **DRM client TLS.** Server names are now verified against the certificate (previously only the chain was), and `MUSICKIT_TLS_PINS` enables optional SPKI SHA-256 pinning. No pins ship by default, so Apple certificate rotation cannot break playback.
+- **Hard-coded `HiRes`.** It follows `BackendConfig.DisableHiRes` (`MUSICKIT_DISABLE_HIRES=1`). The account token carries no subscription tier, so hi-res is still assumed available otherwise.
 
 ## Planned
 
