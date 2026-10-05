@@ -437,6 +437,12 @@ func (cb *circuitBreaker) State() string {
 
 // APIServer is the long-running HTTP daemon started by --api <port>.
 type APIServer struct {
+	// Per-instance playback bookkeeping. These used to be package-level maps, which made two
+	// servers in one process share state; they belong to the server that owns the sessions.
+	vsegStates  sync.Map // sessionID → *vsegState: segmented-video producers
+	mvPreparing sync.Map // assetID → struct{}: faststart caches being built, so the info endpoint can say "preparing" and duplicate jobs are avoided
+	mvEphemeral sync.Map // assetID → struct{}: mv-dl files written under "caching disabled", deleted on session release
+
 	srv         *http.Server
 	tlsSrv      *http.Server // HTTPS listener on port+1 for <video src> byte-range seeking
 	port        int
@@ -589,6 +595,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		acctSource = &drmAccountAdapter{s.dm}
 	}
 	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(cbcsDialer, acctSource))
+	s.installReleaseHook()
 
 	// Prefetch scheduler — credentials are resolved lazily at Submit time
 	// so token rotations are picked up automatically.
@@ -772,7 +779,12 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// OPTIONS, causing preflights to 405.  Chrome also requires the response
 	// to include Access-Control-Allow-Private-Network: true when fetching
 	// across localhost ports (CORS-RFC1918 / Private Network Access).
-	s.srv = &http.Server{Handler: corsPreflightHandler(mux), ReadHeaderTimeout: 10 * time.Second}
+	s.srv = &http.Server{
+		Handler:           corsPreflightHandler(requireToken(os.Getenv("MUSICKIT_API_TOKEN"), mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
 	return s
 }
 
@@ -790,6 +802,9 @@ func (s *APIServer) Start() error {
 	}
 
 	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
+	if err == nil {
+		l = guardListener(l)
+	}
 	if err != nil {
 		if s.sessionLock != nil {
 			s.sessionLock.Release()
@@ -835,7 +850,13 @@ func (s *APIServer) Start() error {
 		slog.Error("loopback TLS setup failed", "err", err)
 		return fmt.Errorf("TLS setup failed: %w", err)
 	}
-	s.tlsSrv = &http.Server{Handler: s.srv.Handler, ReadHeaderTimeout: 10 * time.Second, TLSConfig: tlsCfg}
+	s.tlsSrv = &http.Server{
+		Handler:           s.srv.Handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+		TLSConfig:         tlsCfg,
+	}
 	slog.Info("Apple Music API (TLS) ready", "addr", fmt.Sprintf("https://127.0.0.1:%d", s.port))
 	go s.tlsSrv.ServeTLS(l, "", "") //nolint:errcheck
 
@@ -854,6 +875,9 @@ func (s *APIServer) Stop() {
 	// Stop the export worker before shutting down playback.
 	if s.em != nil {
 		s.em.Stop()
+	}
+	if s.scheduler != nil {
+		s.scheduler.Stop()
 	}
 	// Stop the wrapper process first so it doesn't keep running as an orphan.
 	// Session files are NOT cleared — they persist for the next server start.
@@ -1054,4 +1078,14 @@ func exportRoots() []string {
 		return []string{home}
 	}
 	return []string{"/nonexistent"} // no home to anchor to: refuse rather than allow everything
+}
+
+// installReleaseHook frees a session's server-side resources however the session ends.
+// DELETE /playback/{id} does this itself; a session that simply expires, or whose client
+// vanished, would otherwise leave its producers running and its cache file pinned.
+func (s *APIServer) installReleaseHook() {
+	s.pm.SetReleaseHook(func(id string) {
+		s.stopMVGrowing(id)
+		s.stopVsegSession(id)
+	})
 }

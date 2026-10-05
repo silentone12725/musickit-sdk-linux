@@ -25,6 +25,8 @@ Conventions:
 
 `GET /events` streams `id: N`, `event: <type>`, `data: <json>`. Reconnect with `Last-Event-ID` to replay missed events from the replay buffer. Event types: `engine.snapshot` (sent first), `drm`, `drm.refresh_due`, `playback.created`, `playback.deleted`, `export`.
 
+Two control events tell a client to resynchronise. `replay.truncated` follows the snapshot when the replay buffer no longer holds everything after your `Last-Event-ID` — or when that ID is newer than anything this engine has issued (it restarted and IDs began again). `stream.lagged` is the last event on a connection the engine dropped because the client stopped reading; reconnect with `Last-Event-ID` to catch up.
+
 ## DRM session
 
 | Method | Path | Body | Description |

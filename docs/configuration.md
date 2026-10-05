@@ -36,6 +36,10 @@ The remaining keys (folder templates, tagging, conversion, lyrics format) apply 
 | `MUSICKIT_TLS_PINS` | Comma-separated base64 SPKI SHA-256 pins for the DRM client's HTTPS connections; when set, a handshake succeeds only if some certificate in the served chain matches |
 | `MUSICKIT_WIDEVINE_DIR` | Directory holding `device_private_key` and `device_client_id_blob` (default `~/.config/musickit-sdk-linux/widevine`); required for AAC/MV key requests |
 | `MUSICKIT_MV_DIRECT_SEEK=0` | Disable fragment-level MV seeks and always use the FFmpeg seek producer (on by default for H.264 streams) |
+| `MUSICKIT_EXPORT_ROOTS` | Colon-separated directories exports may write into (default: the user's home). A request's `outputDir` outside them is refused |
+| `MUSICKIT_API_TOKEN` | When set, every API request must carry it (`Authorization: Bearer`, `X-Api-Token` or `?access_token=`) |
+| `MUSICKIT_ALLOW_OTHER_USERS=1` | Turn off the per-user connection check (any local account may then use the API) |
+| `MUSICKIT_HTTPS_TIMEOUT_SEC` | Connect/read timeout in seconds for the DRM client's HTTPS requests (default 30) |
 | `MUSICKIT_DEBUG=1` | Register `/debug/pprof/*` and verbose AAC debug output. Heap dumps can expose key material |
 | `MUSICKIT_CAVERN` | Path to `CavernPipeServer` for lossless Atmos binaural rendering |
 
