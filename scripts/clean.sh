@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # clean.sh — remove generated build output.
 #
-#   scripts/clean.sh             intermediates: compiler objects, the generated embedded-blob
-#                                sources (~400 MB), probe and test binaries, Go test binaries,
+#   scripts/clean.sh             intermediates: compiler objects, test binaries, Go test binaries,
 #                                binaries `go build` left in the source tree
 #   scripts/clean.sh --all       also the built library (drm/libdrm_client.so) and dist/
 #   scripts/clean.sh --dry-run   list what would be removed, remove nothing (combine with --all)
 #
-# Never touched: sources, drm/files (an Apple session), drm/rootfs, drm/libhybris-core.so.
+# Never touched: sources, drm/files (an Apple session).
 # `make clean` / `make distclean` do the same through make.
 
 set -euo pipefail
@@ -24,17 +23,16 @@ for arg in "$@"; do
 done
 
 targets=(
-    drm/embedded_blobs drm/corefp_probe
     examples/go-recommendations/go-recommendations server/musickit-engine sdk/musickit-engine
 )
 while IFS= read -r -d '' f; do targets+=("${f#"$REPO"/}"); done < <(
     find "$REPO/drm" "$REPO/sdk" "$REPO/server" "$REPO/examples" \( -name '*.o' -o -name '*.test' \) -type f \
-        -not -path '*/embedded_blobs/*' -print0)
+        -print0)
 for f in "$REPO"/drm/tests/test_*; do
     [ -f "$f" ] && [ -x "$f" ] && [[ "$f" != *.c && "$f" != *.py && "$f" != *.sh ]] && targets+=("${f#"$REPO"/}")
 done
 if [ "$ALL" = 1 ]; then
-    targets+=(dist drm/libdrm_client.so)
+    targets+=(dist drm/libdrm_client.so drm/libdrm_client.dll drm/libdrm_client.dll.a)
 fi
 
 total=0

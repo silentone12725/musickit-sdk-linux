@@ -16,7 +16,7 @@ musickit-sdk-linux/
 
 ```
 examples ─┐
-          ├─► sdk ─► (cgo) ─► drm/libdrm_client.so ─► Android FairPlay libs (via libhybris)
+          ├─► sdk ─► (cgo) ─► drm/libdrm_client.so (AES key contexts; Widevine keys are acquired in Go)
 server  ──┘
 ```
 

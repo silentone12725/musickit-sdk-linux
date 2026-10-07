@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,9 @@ func guardListener(l net.Listener) net.Listener {
 	if os.Getenv("MUSICKIT_ALLOW_OTHER_USERS") == "1" {
 		slog.Warn("MUSICKIT_ALLOW_OTHER_USERS=1: any local user can use the engine API")
 		return l
+	}
+	if runtime.GOOS == "windows" {
+		return guardListenerWindows(l)
 	}
 	if _, err := os.Stat(procNetPaths[0]); err != nil {
 		slog.Warn("cannot identify local clients (no /proc/net/tcp); the engine API is open to every local user", "err", err)

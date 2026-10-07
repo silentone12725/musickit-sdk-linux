@@ -25,7 +25,6 @@ A local engine and HTTP API that gives Linux applications Apple Music playback w
 ## Get the code
 
 ```sh
-git lfs install                       # the bundled native libraries are stored in Git LFS
 git clone https://github.com/silentone12725/musickit-sdk-linux.git
 cd musickit-sdk-linux
 ```
@@ -35,8 +34,7 @@ Repository: https://github.com/silentone12725/musickit-sdk-linux
 ## Quick start
 
 ```sh
-# 1. Install the Android/Apple Music libs, then build the DRM client and engine
-#    (libhybris and the Android/Apple Music libs are included; see docs/building.md)
+# 1. Build the DRM client library and the engine (see docs/building.md; Windows is covered there too)
 make -C drm libdrm_client.so
 scripts/build-engine.sh dist
 

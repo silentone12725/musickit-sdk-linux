@@ -5,11 +5,9 @@ Work that is queued, in rough priority order.
 ## Known issues
 
 1. **Widevine identity in git history.** The identity is no longer in the tree, but earlier commits contain it; rotate it or rewrite history before publishing.
-2. **Bundled proprietary Android libraries.** `drm/rootfs/system/lib64` carries Apple's libraries (Git LFS). Keep the repository private, or ship an installer script instead; see [NOTICE.md](../NOTICE.md).
 
 ## Resolved
 
-- **Android runtime reduced from 99 libraries to 25, and the embedding removed.** The linker follows every dependency, which pulled in all 99 AOSP libraries (116 MiB) through `libandroid.so` and `libOpenSLES.so`. Apple's libraries import no symbol from either, so they are now empty stubs (`drm/stubs/empty_stub.c`) and `rootfs/system/lib64` is exactly `drm/android-libs.txt` (65 MiB). The opt-in embedding of the Android libraries into `libdrm_client.so` (which broke FairPlay) is gone: only `libhybris-core.so` is embedded, and `libdrm_client.so` went from 64 MB to 1 MB. Verified against the full set with a real session: decrypted ALAC, Atmos and AAC bytes are identical (same SHA-256), via the opt-in `server/playback_live_test.go`.
 
 - **Security and robustness audit.** Fixed: the DRM client's HTTP/1.1 handling (framing, chunked, size cap, timeouts, redirects, retry rules, pooling, SIGPIPE) and RFC 6265 cookie scoping; the local API's per-user connection check and optional token; tool-path and export-output confinement; bounded, cancellable artwork download; slow SSE clients and stale `Last-Event-ID`; library and MV-cache key handling and schema errors; import-time filesystem side effects; session teardown, sliding expiry and per-instance state; DRM backend shutdown ordering; scheduler lifecycle; disk cache eviction and recency; dependencies (`govulncheck` clean).
 
@@ -18,7 +16,6 @@ Work that is queued, in rough priority order.
 
 - **Architecture tests were no-ops.** `sdk/archtest` still matched the old `engine/...` import paths, so no rule ever ran. It now uses the SDK module path, fails if package discovery returns too few packages, and was verified against a deliberate forbidden import.
 - **OpenAPI coverage.** `api/openapi.json` describes all 69 routes, and `server/openapi_test.go` fails when a registered route is missing from the spec.
-- **Vendored libhybris and bundled Android libraries.** The SDK builds and runs host-native FairPlay from a clean clone (libraries tracked with Git LFS).
 - **Documentation accuracy.** `api.md` and `configuration.md` were checked against the handlers (for example `/library/sync` returns 410, VLC routes return 503 when unavailable).
 
 - **DRM client TLS.** Server names are now verified against the certificate (previously only the chain was), and `MUSICKIT_TLS_PINS` enables optional SPKI SHA-256 pinning. No pins ship by default, so Apple certificate rotation cannot break playback.
@@ -46,7 +43,6 @@ Work that is queued, in rough priority order.
 ## Planned
 - Validate fragment-level MV seeks against real Widevine-decrypted output in the player (the decrypt and the player's probe have only been exercised with synthetic and FFmpeg-built streams); consider promoting more of the seek flow into a small client library.
 
-- Wire the vendored wrapper's login/2FA handlers to the DRM auth callback so a missing Android session can be created from the engine.
 - Surface lease-recovery state (`Running`, `Scheduled`, `Refreshing`, `Failed`) in `/drm/status` and the SSE `drm` event.
 - Progressive MV (itun) decryption through the in-process library.
 - Split `server` handlers into focused packages behind small interfaces so individual areas (library, export, catalog) can be embedded without the rest.

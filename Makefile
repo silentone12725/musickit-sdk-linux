@@ -11,7 +11,7 @@ all: engine
 drm:
 	$(MAKE) -C drm libdrm_client.so
 
-# Real engine: CGO + native_backend tag, linked against drm/libdrm_client.so.
+# Real engine: CGO + widevine_backend tag, linked against drm/libdrm_client.so.
 engine: drm
 	scripts/build-engine.sh $(DIST)
 
@@ -27,14 +27,13 @@ vet:
 fmt:
 	gofmt -l sdk server examples
 
-# Intermediates only: objects, embedded-blob sources (~400 MB), probe/test binaries.
+# Intermediates only: compiler objects and test binaries.
 clean:
-	$(MAKE) -C drm clean-objs
+	$(MAKE) -C drm clean
 
 # Everything built, including drm/libdrm_client.so and $(DIST). scripts/clean.sh does the
 # same with --dry-run and reporting.
 distclean: clean
-	$(MAKE) -C drm clean
 	rm -rf $(DIST)
 
 # Real engine, then drop the build intermediates.

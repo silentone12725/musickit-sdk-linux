@@ -13,6 +13,6 @@ go test ./...            # all packages, including archtest
 go test ./archtest       # boundaries only
 ```
 
-Packages that use cgo: `drm` (build tag `native_backend`, links `drm/libdrm_client.so`) and `vlc` (libvlc).
+Packages that use cgo: `drm` (build tag `widevine_backend`, links `drm/libdrm_client.so`) and `vlc` (libvlc).
 
 Good entry points: `ampapi` (catalog and personalised feeds), `hls` (playlist parsing), `media` + `pipeline` + `playback` (the provider/stream model), `library` (encrypted local cache).

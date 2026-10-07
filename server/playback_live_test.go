@@ -1,4 +1,4 @@
-//go:build native_backend && drmlive
+//go:build widevine_backend && drmlive
 
 package server
 
@@ -28,19 +28,16 @@ import (
 // decrypt stages, then decode the result with FFmpeg. The tokens come from the engine's own state
 // (the web developer token and the DRM session's media-user token) and are never printed.
 //
-// Opt-in: go test -tags "native_backend drmlive" -run TestPlaybackLive ./cmd
+// Opt-in: go test -tags "widevine_backend drmlive" -run TestPlaybackLive ./cmd
 //
 //	PLAY_ADAM      catalog id (song or music video)
 //	PLAY_KIND      alac | aac | atmos | mv | mvaudio   (default alac; mv = the video stream,
 //	               mvaudio = the audio stream of a music video)
 //	PLAY_ADAM=auto with PLAY_KIND=atmos picks the first catalog search hit that has Dolby Atmos
-//	PLAY_DRM_DIR   the drm directory (holds rootfs/ and hybris-linker/)
+//	PLAY_DRM_DIR   the drm directory (holds libdrm_client.so and files/)
 //	PLAY_FILES_DIR the DRM session directory (default <PLAY_DRM_DIR>/files)
 //	PLAY_SF        storefront (default "in")
 //	PLAY_MAXMB     stop after this many MiB of the stream (default: the whole stream)
-//
-// Set MUSICKIT_DRM_DIR to a directory whose rootfs/system/lib64 should be used instead of the
-// default, to compare Android runtimes: the decrypted bytes must be identical.
 func TestPlaybackLive(t *testing.T) {
 	adam, drmDir := os.Getenv("PLAY_ADAM"), os.Getenv("PLAY_DRM_DIR")
 	if adam == "" || drmDir == "" {

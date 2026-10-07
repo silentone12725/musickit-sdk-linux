@@ -191,7 +191,7 @@ func (dc *drmConn) close() {
 
 // CBCSDialer is the minimal interface CBCSSource requires to open a
 // FairPlay decryption connection. In production DRMManager implements this,
-// delegating to NativeBackend.DialCBCS which returns an in-process net.Pipe().
+// delegating to WidevineBackend.DialCBCS which returns an in-process net.Pipe().
 //
 // Defined here (not in sdk/drm) so that sdk/fairplay does not import
 // sdk/drm, preserving the one-way dependency: drm → fairplay is forbidden.

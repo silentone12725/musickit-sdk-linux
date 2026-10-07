@@ -1,12 +1,12 @@
 # drm
 
-`libdrm_client.so` — the in-process DRM library the Go `sdk/drm` package links through cgo.
+`libdrm_client.so` (`libdrm_client.dll` on Windows) — the in-process DRM library the Go `sdk/drm` package links through cgo.
 
 ```sh
-make libdrm_client.so      # embeds the vendored libhybris-core.so
-make android-stubs         # generates libandroid.so / libOpenSLES.so in rootfs/system/lib64
+make libdrm_client.so       # Linux: needs OpenSSL and libcurl development files
+mingw32-make libdrm_client.dll   # Windows (MSYS2 UCRT64): builds drm_linux.c against libcrypto only
 ```
 
-Files: `drm_client.*` (clean-room client), `drm_hybris.*` (bridge to the Android FairPlay libraries), `embedded_loader.*` (loads the embedded libhybris-core.so), `native/` (vendored wrapper in library mode, see [../NOTICE.md](../NOTICE.md)), `build-icu-ndk.sh` (optional ICU build), `libhybris-core.so` + `hybris-linker/q.so` + `vendor/libhybris/` (vendored libhybris with provenance, patch, licences and rebuild script).
+Files: `drm_linux.c` (the flat `drm_*` API the engine calls: key contexts and AES-128-CBC decryption over OpenSSL), `drm_client.*` and `drm_types.h` (clean-room client), `fairplay*.c`, `fp_*.c` (clean-room FairPlay building blocks, not on the playback path).
 
-Runtime requirements (Android libraries, `hybris-linker/q.so`), the key and lease flow, and failure modes are in [../docs/drm.md](../docs/drm.md).
+Content keys are acquired in Go through Widevine (`sdk/aacstream`); this library only holds key contexts and decrypts. See [../docs/drm.md](../docs/drm.md).
