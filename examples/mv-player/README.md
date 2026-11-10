@@ -32,8 +32,8 @@ drag the seek bar past the buffered range and watch the log. Environment switche
    once in the same browser and accept it.
 3. `node serve.mjs`, open <http://127.0.0.1:8080>, keep the default engine URL, enter a music-video id.
 
-The engine only answers browsers whose origin is `https://music.apple.com` or a loopback origin, which is why the
-page is served from `127.0.0.1`.
+The engine only answers browsers whose origin is `https://music.apple.com` or a loopback origin on its own port, so start
+it with `MUSICKIT_ALLOW_LOCAL_ORIGINS=1` (this page is served from `127.0.0.1:8080`, a different port).
 
 The page plays the picture only. The soundtrack is a separate stream (`/playback/{id}/audio`) that a real player
 keeps in step with the video clock.

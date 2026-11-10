@@ -71,14 +71,13 @@ type DRMBackend interface {
 	SetAuthSource(AuthSource)
 
 	// DRM operations — transport details invisible to callers.
-	Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error)
 	GetM3U8(ctx context.Context, adamID uint64) (string, error)
 	GetAccount(ctx context.Context) (AccountInfo, error)
 	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
 	DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error)
 
 	// DialCBCS opens one CBCS decryption connection (satisfies fairplay.CBCSDialer).
-	// WidevineBackend returns an in-process net.Pipe() backed by widevineCBCSServe.
+	// WidevineBackend returns an in-process backend (libdrm_client.so via cgo).
 	DialCBCS(ctx context.Context) (net.Conn, error)
 
 	// Events returns a channel that emits DRMEvents as backend state changes.
@@ -108,9 +107,15 @@ type BackendConfig struct {
 
 	// DisableHiRes reports hi-res lossless as unavailable in the capability
 	// snapshot. The account JWT carries no subscription tier, so hi-res is
-	// assumed available once FairPlay is ready unless the embedder opts out
-	// (for example for an account known to lack the lossless tier).
+	// assumed available once FairPlay is ready unless the embedder opts out.
 	DisableHiRes bool
+
+	// GetMusicToken, when set, is called during Start() to obtain the
+	// Media-User-Token from the web player session. If the MUSIC_TOKEN file
+	// is missing from BaseDir, the returned value is written there so the
+	// Android library has a fallback when createMusicToken() fails (which
+	// happens after a sign-out clears mpl_db credentials).
+	GetMusicToken func() string
 }
 
 // ─── Authentication challenge model ──────────────────────────────────────────
@@ -130,6 +135,9 @@ type AuthSource interface {
 // are handled by adding new AuthChallengeType values and Metadata keys
 // without changing the interface.
 type AuthChallenge struct {
+	// ID numbers each announced challenge, so a client can tell Apple asking
+	// again (a wrong code) from the same challenge repeated in later snapshots.
+	ID          uint64            `json:"id,omitempty"`
 	Type        AuthChallengeType `json:"type"`
 	Title       string            `json:"title"`
 	Description string            `json:"description,omitempty"`
@@ -156,10 +164,16 @@ const (
 	// Reply: "approved" or "denied".
 	// Metadata: {"device": "<device name>", "timeout": "<seconds>"}
 	ChallengeDeviceApproval
+
+	// ChallengeDialogChoice presents a list of options from a ProtocolDialog
+	// that Apple raises during sign-in (e.g. "Text code / Get a call / Can't use...").
+	// Reply: decimal button index ("0", "1", "2", ...).
+	// Metadata: {"buttons": "<btn0>\n<btn1>\n..."}
+	ChallengeDialogChoice
 )
 
 func (t AuthChallengeType) String() string {
-	return [...]string{"credentials", "two_factor", "device_approval"}[t]
+	return [...]string{"credentials", "two_factor", "device_approval", "dialog_choice"}[t]
 }
 
 func (t AuthChallengeType) MarshalJSON() ([]byte, error) {

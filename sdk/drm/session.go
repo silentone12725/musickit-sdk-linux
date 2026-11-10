@@ -2,6 +2,7 @@ package drm
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,8 +43,15 @@ const sessionValidityTTL = 4 * time.Hour
 type SessionManager struct {
 	baseDir string
 
+	// webSession supplies the media-user-token (and storefront, when known) the web player handed
+	// to the engine. It stands in for the credential files an old login wrote, so a profile that
+	// only ever signed in on the web still counts as having a session.
+	webSession func() (mut, storefront string)
+
 	mu          sync.Mutex
 	lastSuccess time.Time
+	hooks       *fileHooks // test-only replacement of the sign-out file operations
+	unsynced    bool       // sign-out files removed but the directory sync failed
 }
 
 // NewSessionManager creates a SessionManager rooted at baseDir.
@@ -51,13 +59,43 @@ func NewSessionManager(baseDir string) *SessionManager {
 	return &SessionManager{baseDir: baseDir}
 }
 
-// HasSession returns true if mpl_db/accounts.sqlitedb exists and has
-// content. This indicates a prior login occurred but does NOT guarantee
-// the session is currently usable — use IsSessionValid for that.
+// SetWebSession registers where the web player's media-user-token comes from. The function must be
+// cheap and must not call back into the SessionManager.
+func (s *SessionManager) SetWebSession(fn func() (mut, storefront string)) {
+	s.mu.Lock()
+	s.webSession = fn
+	s.mu.Unlock()
+}
+
+func (s *SessionManager) web() (mut, storefront string) {
+	s.mu.Lock()
+	fn := s.webSession
+	s.mu.Unlock()
+	if fn == nil {
+		return "", ""
+	}
+	return fn()
+}
+
+// HasSession reports whether an Apple account is signed in: the login database
+// (mpl_db/accounts.sqlitedb) has content, or a backend wrote the explicit
+// "session-ready" marker. A web-player token alone is not a session: lossless
+// needs a sign-in, and counting the token made a signed-out engine report
+// "signed in" again (and start the backend) as soon as the page sent it. The
+// token is still read for MUSIC_TOKEN/STOREFRONT_ID (ReadMusicToken,
+// ReadStorefrontID).
+// It does NOT guarantee the session is currently usable — use IsSessionValid.
+//
+// A pending sign-out (an engine marker or a backstop from the main process) means
+// no session: it is about to be removed and must not be used meanwhile.
 func (s *SessionManager) HasSession() bool {
-	path := filepath.Join(s.baseDir, "mpl_db", "accounts.sqlitedb")
-	info, err := os.Stat(path)
-	return err == nil && info.Size() > 0
+	has := false
+	if info, err := os.Stat(filepath.Join(s.baseDir, "mpl_db", "accounts.sqlitedb")); err == nil && info.Size() > 0 {
+		has = true
+	} else if _, err := os.Stat(filepath.Join(s.baseDir, "session-ready")); err == nil {
+		has = true
+	}
+	return has && !s.hasPending()
 }
 
 // RecordSuccess records the timestamp of a successful DRM operation.
@@ -123,26 +161,53 @@ type SessionInfo struct {
 	MusicToken   string
 }
 
-// ClearSession removes mpl_db/, STOREFRONT_ID, MUSIC_TOKEN, and drm-state.
-// The backend process must be stopped before calling ClearSession to avoid
-// storeservicescore writing the files back during deletion.
+// ClearSession signs out the account on disk in one complete pass: it records the
+// request, removes the account files (and the device files if a pending request asks
+// for that) and then the request itself. The device identity stays, so Apple keeps
+// recognising the machine. An error keeps the request, and the next pass finishes it.
+// The backend must be stopped first, or storeservicescore writes the files back.
 func (s *SessionManager) ClearSession() error {
-	paths := []string{
-		filepath.Join(s.baseDir, "mpl_db"),
-		filepath.Join(s.baseDir, "STOREFRONT_ID"),
-		filepath.Join(s.baseDir, "MUSIC_TOKEN"),
-		filepath.Join(s.baseDir, "drm-state"),
+	if err := s.MarkLogoutPending(scopeAccount); err != nil {
+		return err
 	}
-	var lastErr error
-	for _, p := range paths {
-		if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
-			lastErr = err
+	return s.runPendingPass()
+}
+
+// fairPlayKeyFiles lists FairPlay's key store files in dir, which it names by a
+// 40-digit upper-case hex hash (e.g. 33F633BF6AC7D676168B84C3594A7941AF2BEC09).
+func fairPlayKeyFiles(dir string) []string {
+	entries, _ := os.ReadDir(dir)
+	var out []string
+	for _, e := range entries {
+		if n := e.Name(); !e.IsDir() && isUpperHex(n, 40) {
+			out = append(out, filepath.Join(dir, n))
 		}
 	}
-	s.mu.Lock()
-	s.lastSuccess = time.Time{}
-	s.mu.Unlock()
-	return lastErr
+	return out
+}
+
+func isUpperHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// CompletePendingLogout finishes every sign-out request left on disk (an engine
+// marker from an interrupted sign-out, or a main-process backstop) with the scope
+// it asked for. It returns an error while any request remains; callers must not
+// start or reuse a session then.
+func (s *SessionManager) CompletePendingLogout() error {
+	if !s.hasPending() {
+		return nil
+	}
+	log.Printf("[drm] completing a pending sign-out")
+	return s.runPendingPass()
 }
 
 // StateFilePath returns the path of the drm-state file written by main.c.
@@ -158,7 +223,11 @@ func (s *SessionManager) TwoFAFilePath() string {
 
 // ReadStorefrontID reads {BaseDir}/STOREFRONT_ID.
 func (s *SessionManager) ReadStorefrontID() string {
-	return readFile(filepath.Join(s.baseDir, "STOREFRONT_ID"))
+	if sf := readFile(filepath.Join(s.baseDir, "STOREFRONT_ID")); sf != "" {
+		return sf
+	}
+	_, sf := s.web()
+	return sf
 }
 
 // NormalizeStorefrontID strips the platform/content-class suffix that the
@@ -183,7 +252,11 @@ func NormalizeStorefrontID(sf string) string {
 // refresh the token during the engine's lifetime, so callers must not
 // assume the value is immutable or cache it.
 func (s *SessionManager) ReadMusicToken() string {
-	return readFile(filepath.Join(s.baseDir, "MUSIC_TOKEN"))
+	if t := readFile(filepath.Join(s.baseDir, "MUSIC_TOKEN")); t != "" {
+		return t
+	}
+	t, _ := s.web()
+	return t
 }
 
 // readFile returns the file's content without surrounding whitespace: these

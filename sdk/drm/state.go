@@ -39,8 +39,15 @@ const (
 	ManagerFailed                           // 5
 )
 
+var managerStateNames = [...]string{"unknown", "disabled", "initializing", "ready", "shutting_down", "failed"}
+
+// String is total: a value outside the defined states (a zero-value mix-up, a bad cast) reads as
+// "unknown" instead of panicking, which JSON marshalling would otherwise turn into a failed response.
 func (s ManagerState) String() string {
-	return [...]string{"unknown", "disabled", "initializing", "ready", "shutting_down", "failed"}[s]
+	if s < 0 || int(s) >= len(managerStateNames) {
+		return managerStateNames[ManagerUnknown]
+	}
+	return managerStateNames[s]
 }
 
 func (s ManagerState) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
@@ -177,6 +184,7 @@ type DRMSnapshot struct {
 	State        DRMState        `json:"state"`
 	Capabilities CapabilityState `json:"capabilities"`        // derived; at snapshot level, not state
 	Challenge    *AuthChallenge  `json:"challenge,omitempty"` // non-nil only when Auth == AuthChallenging
+	Failure      *SignInFailure  `json:"failure,omitempty"`   // why the last sign-in failed; set while Auth == AuthFailed
 	Timestamp    time.Time       `json:"timestamp"`
 	Message      string          `json:"message,omitempty"` // log text; never parsed for state
 }
@@ -190,6 +198,7 @@ var stateFileStrings = map[string]stateFileResult{
 	"STARTING":              {Process: ProcessStarting, FairPlay: FairPlayUnknown},
 	"LOGIN":                 {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthLoggingIn},
 	"WAITING_2FA":           {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
+	"WAITING_DIALOG":        {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
 	"INITIALIZING_FAIRPLAY": {Process: ProcessRunning, FairPlay: FairPlayInitializing, Auth: AuthLoggedIn},
 	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlayReady, Auth: AuthLoggedIn, Recovery: RecoveryIdle},
 	"RECOVERY":              {Process: ProcessRunning, FairPlay: FairPlayReady, Recovery: RecoveryRefreshing},

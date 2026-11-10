@@ -983,6 +983,12 @@
           },
           "503": {
             "description": "DRM backend unavailable"
+          },
+          "409": {
+            "description": "A sign-in is already running"
+          },
+          "429": {
+            "description": "Too many failed attempts; `Retry-After` says how long to wait"
           }
         }
       }
@@ -1031,10 +1037,10 @@
         "tags": [
           "DRM"
         ],
-        "summary": "Sign out",
+        "summary": "Sign out (keeps the device identity)",
         "responses": {
           "200": {
-            "description": "Signed out; current DRM snapshot",
+            "description": "Signed out; DRM snapshot plus `serverSignOut` (whether Apple's server was told). When the sign-out must finish in the next process the engine answers, then exits with status 3 so its supervisor can start it again.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1044,7 +1050,7 @@
             }
           },
           "500": {
-            "description": "Error (plain-text body)"
+            "description": "Sign-out failed (same body shape)"
           },
           "503": {
             "description": "DRM backend unavailable"
@@ -1057,18 +1063,52 @@
         "tags": [
           "DRM"
         ],
-        "summary": "Drop the stored session",
+        "summary": "Sign out (same as logout)",
         "responses": {
-          "204": {
-            "description": "Session cleared"
+          "200": {
+            "description": "Signed out; DRM snapshot plus `serverSignOut` (whether Apple's server was told). When the sign-out must finish in the next process the engine answers, then exits with status 3 so its supervisor can start it again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DRMStatus"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Error (plain-text body)"
+            "description": "Sign-out failed (same body shape)"
           },
           "503": {
             "description": "DRM backend unavailable"
           }
         }
+      }
+    },
+    "/api/v1/drm/forget-device": {
+      "post": {
+        "tags": [
+          "DRM"
+        ],
+        "summary": "Forget this device",
+        "responses": {
+          "200": {
+            "description": "Signed out; DRM snapshot plus `serverSignOut` (whether Apple's server was told). When the sign-out must finish in the next process the engine answers, then exits with status 3 so its supervisor can start it again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DRMStatus"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Sign-out failed (same body shape)"
+          },
+          "503": {
+            "description": "DRM backend unavailable"
+          }
+        },
+        "description": "Sign out and also remove the device identity, so Apple treats the next sign-in as a new device and asks for a verification code."
       }
     },
     "/api/v1/playback/context": {
@@ -1131,6 +1171,35 @@
             "description": "Error (plain-text body)"
           }
         }
+      }
+    },
+    "/api/v1/playback/{id}/touch": {
+      "post": {
+        "tags": [
+          "Playback"
+        ],
+        "summary": "Keep a session alive",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Playback session ID",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session is alive"
+          },
+          "404": {
+            "description": "Session not found or expired (plain-text body)"
+          }
+        },
+        "description": "Slides the session's expiry. A paused track would otherwise be swept after its idle timeout; a 404 tells the client the session is gone and must be reopened."
       }
     },
     "/api/v1/playback/{id}/video-es": {
@@ -2776,6 +2845,10 @@
           "sessionTTLMs": {
             "type": "integer",
             "format": "int64"
+          },
+          "available": {
+            "type": "boolean",
+            "description": "False when this build has no DRM layer, so the session can never become ready"
           }
         },
         "additionalProperties": true

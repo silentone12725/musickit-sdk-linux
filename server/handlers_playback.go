@@ -26,6 +26,7 @@ import (
 	"github.com/silentone12725/musickit-sdk-linux/sdk/pipeline"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/playback"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/prefetch"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/vlog"
 )
 
 // ── MV WebCodecs growing-file seek (ALAC-style) ──────────────────────────────
@@ -214,7 +215,10 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 	}
 	mut := req.MUT
 	if mut == "" {
-		mut = s.mediaUserToken()
+		// musicUserToken() checks the in-memory MK token pushed at startup via
+		// POST /api/v1/library/token before falling back to the MUSIC_TOKEN file.
+		// This lets lossless work from the web-player session without any DRM file.
+		mut = s.musicUserToken()
 	}
 	if token == "" || mut == "" {
 		http.Error(w, "not authenticated — provide token+mediaUserToken in request body or configure them", http.StatusUnauthorized)
@@ -259,6 +263,7 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 			Token:       token,
 			MUT:         mut,
 			Lossless:    req.Capabilities.Lossless,
+			HiRes:       req.Capabilities.HiRes,
 			Video:       req.Capabilities.Video,
 			Atmos:       req.Capabilities.Atmos,
 			Language:    s.lang(r),
@@ -325,9 +330,13 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 	// For seeks, pm.StreamFrom serves the correct fMP4 fragment directly from the CDN.
 	// INTERCEPT: wrap writer for MV sessions to count/log bytes sent to browser.
 	if sess.Type == "mv" {
-		cw := &countingWriter{w: w}
+		// Keep the counting wrapper inside streamMedia's firstByteWriter. Writing
+		// directly to w would commit a 200 before streamMedia can turn a
+		// pre-first-byte pipeline error into a useful 502 response.
+		cw := &countingWriter{}
 		log.Printf("[INTERCEPT] MV audio stream START id=%s codec=%s", id, sess.Codec)
 		streamMedia(w, r, func(dst io.Writer) error {
+			cw.w = dst
 			return s.pm.Stream(r.Context(), id, pipeline.KindAudio, cw)
 		}, "audio/mp4")
 		log.Printf("[INTERCEPT] MV audio stream END id=%s totalBytes=%d", id, cw.n)
@@ -466,17 +475,17 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 // background. The context is detached from any client so the cache still
 // commits when the listener disconnects mid-track (skip).
 func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWriter) {
-	log.Printf("[cache] startCacheDownload START: session=%s", id)
-	downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	vlog.Printf("[cache] startCacheDownload START: session=%s", id)
+	downloadCtx, cancel := context.WithTimeout(s.shutdownCtx, 15*time.Minute) // shutdownCtx: from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1)
 	go func() {
 		defer cancel()
 		defer s.alac.done(id)
-		log.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
+		vlog.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
 		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, s.alac.writer(downloadCtx, id, spw)); err != nil {
 			log.Printf("[cache] startCacheDownload pm.Stream ERROR: session=%s err=%v", id, err)
 			spw.Discard()
 		} else {
-			log.Printf("[cache] startCacheDownload SUCCESS: session=%s", id)
+			vlog.Printf("[cache] startCacheDownload SUCCESS: session=%s", id)
 			spw.Commit()
 		}
 	}()
@@ -501,7 +510,7 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusNoContent) // already in cache
 		return
 	}
-	bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	bgCtx, cancel := context.WithTimeout(s.shutdownCtx, 10*time.Minute) // shutdownCtx: from PR #1
 	go func() {
 		defer cancel()
 		defer s.alac.done(id)
@@ -1021,6 +1030,17 @@ func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request)
 	}
 	s.pm.Release(id)
 	s.events.emit("playback.deleted", map[string]string{"sessionId": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePlaybackTouch keeps a session alive while the renderer still has it open. A session's expiry only slides
+// when something looks it up, so a track paused for hours would otherwise be swept and could not be resumed. A 404
+// tells the renderer the session is gone and the track must be reopened at its saved position.
+func (s *APIServer) handlePlaybackTouch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.pm.GetSession(r.PathValue("id")); !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

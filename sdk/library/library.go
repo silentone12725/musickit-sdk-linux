@@ -78,7 +78,8 @@ type PlaylistTrack struct {
 // Store is the library cache backed by in-memory SQLite with encrypted persistence.
 type Store struct {
 	db      *sql.DB
-	saveMu  sync.Mutex // serialises save()
+	saveMu  sync.Mutex     // serialises save()
+	bg      sync.WaitGroup // background saves in flight, so a test can wait for them before removing its directory
 	keyPath string
 	encPath string
 	key     []byte // cached encryption key; loaded once in encKey()
@@ -172,24 +173,26 @@ func (s *Store) encKey() ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
-	// O_EXCL: if another process created the key since our read, use theirs.
-	f, err := os.OpenFile(s.keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Write the key to a temp file and hard-link it into place: the link fails if another
+	// process created the key first (then use theirs), and a reader never sees a
+	// half-written key file.
+	tmp, err := os.CreateTemp(filepath.Dir(s.keyPath), ".library.key.*")
 	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			if data, rerr := read(); rerr == nil {
-				s.key = data
-				return s.key, nil
-			}
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	defer os.Remove(tmp.Name()) //nolint:errcheck
+	if _, err := tmp.Write(key); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := os.Link(tmp.Name(), s.keyPath); err != nil {
+		if data, rerr := read(); rerr == nil {
+			s.key = data
+			return s.key, nil
 		}
-		return nil, fmt.Errorf("write key: %w", err)
-	}
-	if _, err := f.Write(key); err != nil {
-		f.Close()
-		os.Remove(s.keyPath) //nolint:errcheck
-		return nil, fmt.Errorf("write key: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(s.keyPath) //nolint:errcheck
 		return nil, fmt.Errorf("write key: %w", err)
 	}
 	s.key = key
@@ -330,6 +333,15 @@ func loadTx(tx *sql.Tx, dc *diskCache) error {
 	return nil
 }
 
+// saveAsync persists the cache in the background.
+func (s *Store) saveAsync() {
+	s.bg.Add(1)
+	go func() {
+		defer s.bg.Done()
+		s.save()
+	}()
+}
+
 func (s *Store) save() {
 	if s.db == nil {
 		return
@@ -381,17 +393,31 @@ func (s *Store) save() {
 // querySongs / queryPlaylists / queryAllPlaylistTracks / querySyncedAt all have
 // *InTx variants used by save() so the full dump is one consistent snapshot.
 
+// queryRows runs q on tx (or the store's db) and logs a failure instead of
+// swallowing it: a silent nil here would make save() persist a truncated snapshot.
+func (s *Store) queryRows(tx *sql.Tx, q string) *sql.Rows {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tx != nil {
+		rows, err = tx.Query(q)
+	} else {
+		rows, err = s.db.Query(q)
+	}
+	if err != nil {
+		log.Printf("[library] query failed: %v", err)
+		return nil
+	}
+	return rows
+}
+
 func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
 	if tx == nil && s.db == nil {
 		return nil
 	}
 	q := "SELECT lid,cid,name,artist,album,album_id,ms,track_number,disc_number FROM songs"
-	var rows *sql.Rows
-	if tx != nil {
-		rows, _ = tx.Query(q)
-	} else {
-		rows, _ = s.db.Query(q)
-	}
+	rows := s.queryRows(tx, q)
 	if rows == nil {
 		return nil
 	}
@@ -440,12 +466,7 @@ func (s *Store) queryPlaylistsInTx(tx *sql.Tx) []PlaylistInfo {
 		return nil
 	}
 	q := "SELECT lid,name,track_count FROM playlists"
-	var rows *sql.Rows
-	if tx != nil {
-		rows, _ = tx.Query(q)
-	} else {
-		rows, _ = s.db.Query(q)
-	}
+	rows := s.queryRows(tx, q)
 	if rows == nil {
 		return nil
 	}
@@ -471,12 +492,7 @@ func (s *Store) queryAllPlaylistTracksInTx(tx *sql.Tx) map[string][]PlaylistTrac
 		return nil
 	}
 	q := "SELECT playlist_id,lid,cid FROM playlist_tracks ORDER BY playlist_id,position"
-	var rows *sql.Rows
-	if tx != nil {
-		rows, _ = tx.Query(q)
-	} else {
-		rows, _ = s.db.Query(q)
-	}
+	rows := s.queryRows(tx, q)
 	if rows == nil {
 		return nil
 	}
@@ -627,7 +643,7 @@ func (s *Store) SetPlaylistTracks(playlistID string, tracks []PlaylistTrack) {
 		log.Printf("[library] set playlist tracks commit: %v", err)
 		return
 	}
-	go s.save()
+	s.saveAsync()
 }
 
 // IngestPayload is sent by the JS library sync function.
@@ -693,7 +709,7 @@ func (s *Store) Ingest(p IngestPayload) {
 	}
 
 	log.Printf("[library] ingested: %d songs, %d albums, %d playlists", len(p.Songs), len(p.Albums), len(p.Playlists))
-	go s.save()
+	s.saveAsync()
 }
 
 func ingestSongs(tx *sql.Tx, songs []amItem) error {
@@ -834,11 +850,20 @@ type amPlayParams struct {
 	CatalogID string `json:"catalogId"`
 }
 
+// maxPlaylistPages bounds pagination: 100 tracks/page covers far more than any real playlist.
+const maxPlaylistPages = 1000
+
 func fetchPlaylistTracks(ctx context.Context, c *resty.Client, playlistID string) ([]PlaylistTrack, error) {
 	var all []PlaylistTrack
 	path := fmt.Sprintf("/v1/me/library/playlists/%s/tracks", playlistID)
 	params := map[string]string{"limit": fmt.Sprintf("%d", pageLimit)}
-	for path != "" {
+	seen := map[string]struct{}{}
+	for pages := 0; path != ""; pages++ {
+		// A server that repeats a cursor, or never ends, must not spin forever.
+		if _, dup := seen[path]; dup || pages >= maxPlaylistPages {
+			return nil, fmt.Errorf("playlist pagination did not terminate (page %d)", pages)
+		}
+		seen[path] = struct{}{}
 		var resp amResponse
 		r, err := c.R().SetContext(ctx).SetQueryParams(params).SetResult(&resp).Get(path)
 		if err != nil {

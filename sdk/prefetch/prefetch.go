@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"math"
 	"regexp"
@@ -295,6 +296,9 @@ func newWorkQueue() *workQueue {
 func (q *workQueue) push(item *workItem) (evicted *workItem) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.done {
+		return item // no worker will ever pop it; hand it back so its job can finish
+	}
 	if q.h.Len() >= maxQueueDepth {
 		minI := 0
 		for i := range q.h {
@@ -466,15 +470,36 @@ type CacheConfig struct {
 	PersistTTLDays int64 `json:"persistTTLDays,omitempty"`
 }
 
+const (
+	// The largest values safely convertible to bytes and time.Duration.
+	MaxCacheLimitMB int64 = (1<<63 - 1) / (1024 * 1024)
+	MaxCacheTTLDays int64 = (1<<63 - 1) / int64(24*time.Hour)
+)
+
+// Validate rejects negative values and values whose unit conversion would
+// overflow. Zero means the engine default/unlimited value.
+func (cfg CacheConfig) Validate() error {
+	if cfg.PrewarmLimitMB < 0 || cfg.PrewarmLimitMB > MaxCacheLimitMB {
+		return fmt.Errorf("prewarmLimitMB must be between 0 and %d", MaxCacheLimitMB)
+	}
+	if cfg.PersistLimitMB < 0 || cfg.PersistLimitMB > MaxCacheLimitMB {
+		return fmt.Errorf("persistLimitMB must be between 0 and %d", MaxCacheLimitMB)
+	}
+	if cfg.PersistTTLDays < 0 || cfg.PersistTTLDays > MaxCacheTTLDays {
+		return fmt.Errorf("persistTTLDays must be between 0 and %d", MaxCacheTTLDays)
+	}
+	return nil
+}
+
 // SetCacheConfig atomically applies user-supplied cache limits.
 func (s *Scheduler) SetCacheConfig(cfg CacheConfig) {
-	if cfg.PrewarmLimitMB >= 0 {
+	if cfg.PrewarmLimitMB >= 0 && cfg.PrewarmLimitMB <= MaxCacheLimitMB {
 		s.prewarmLimitMB.Store(cfg.PrewarmLimitMB)
 	}
-	if cfg.PersistLimitMB >= 0 {
+	if cfg.PersistLimitMB >= 0 && cfg.PersistLimitMB <= MaxCacheLimitMB {
 		s.persistLimitMB.Store(cfg.PersistLimitMB)
 	}
-	if cfg.PersistTTLDays >= 0 {
+	if cfg.PersistTTLDays >= 0 && cfg.PersistTTLDays <= MaxCacheTTLDays {
 		s.persistTTLDays.Store(cfg.PersistTTLDays)
 	}
 }
@@ -879,7 +904,9 @@ func (s *Scheduler) warm(item *workItem) {
 		case <-item.ctx.Done():
 			// Job was cancelled — release the session we just opened.
 			s.mu.Lock()
-			delete(s.preWarmed, item.track.AssetID)
+			if cur, ok := s.preWarmed[item.track.AssetID]; ok && cur.sessionID == sess.ID {
+				delete(s.preWarmed, item.track.AssetID)
+			}
 			s.mu.Unlock()
 			s.pm.Release(sess.ID)
 			job.finishCancelled()

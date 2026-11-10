@@ -14,13 +14,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/silentone12725/musickit-sdk-linux/sdk/ampapi"
@@ -30,6 +33,7 @@ import (
 	"github.com/silentone12725/musickit-sdk-linux/sdk/mvlabel"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/pipeline"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/tracer"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/vlog"
 )
 
 // webplaybackClient is used for all Apple webplayback API calls.
@@ -52,17 +56,10 @@ const (
 	FlavorCTR64  AssetFlavor = "32:ctrp64"  // 64 kbps AAC-LC
 
 	// CBCS/FairPlay flavors — EXT-X-KEY URI="skd://itunes.apple.com/…"
-	// Decryption is handled in-process via DRMManager.DialCBCS (WidevineBackend).
+	// Decryption is handled in-process via DRMManager.DialCBCS (AdamplayBackend).
 	FlavorCBCS256 AssetFlavor = "30:cbcp256" // 256 kbps AAC-LC
 	FlavorCBCS64  AssetFlavor = "34:cbcp64"  // 64 kbps AAC-LC
 )
-
-// NewProvider returns a media.Provider backed by Apple Music.
-// ALAC and Atmos tracks require a CBCS decryption socket; use NewProviderWithCBCS
-// to enable them.
-func NewProvider() media.Provider {
-	return &appleMusicProvider{lp: fairplay.New(), acct: nil}
-}
 
 // AccountTokenSource supplies iTunes-style auth tokens and native API calls
 // from the Android DRM backend. It is satisfied by *drm.DRMManager via a
@@ -142,7 +139,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	switch {
 	case req.Atmos && traits["atmos"]:
 		codec, hlsFilter = pipeline.CodecAtmos, "ec-3"
-	case req.Lossless && traits["hi-res-lossless"]:
+	case req.Lossless && req.HiRes && traits["hi-res-lossless"]:
 		codec, hlsFilter = pipeline.CodecALAC, "alac"
 		sr, bd = extractALACQuality(a.AudioTraits)
 	case req.Lossless && traits["lossless"]:
@@ -160,7 +157,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		// Widevine license provider both understand.
 		// The catalog enhanced-HLS variants use URI="skd://…" (FairPlay CBCS),
 		// which requires a different key path not yet wired into the engine.
-		playlistURL, err = p.webplaybackAssetURL(ctx, req.AssetID, token, req.MUT, FlavorCTR256)
+		playlistURL, err = p.webplaybackAssetURL(ctx, req.AssetID, req.Storefront, token, req.MUT, FlavorCTR256)
 		if err != nil {
 			return nil, fmt.Errorf("webplayback AAC asset: %w", err)
 		}
@@ -262,7 +259,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	}
 	a := mv.Data[0].Attributes
 
-	masterURL, err := p.webplaybackURL(ctx, req.AssetID, token, req.MUT)
+	masterURL, err := p.webplaybackURL(ctx, req.AssetID, req.Storefront, token, req.MUT)
 	if err != nil {
 		return nil, fmt.Errorf("webplayback API: %w", err)
 	}
@@ -272,7 +269,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		return nil, fmt.Errorf("open MV master playlist: %w", err)
 	}
 
-	log.Printf("[mv] assetID=%s masterURL=%s nVariants=%d h264Heights=%v",
+	log.Printf("[mv] assetID=%s masterURL=%s nVariants=%d videoHeights=%v",
 		req.AssetID, masterURL, len(master.Variants), master.VideoHeights())
 
 	audioURL, err := master.SelectAudioVariant(req.MVAudioPriorities)
@@ -287,16 +284,31 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	// files (mvod.itunes.apple.com) carry iTunes FairPlay DRM (drmi/drms,
 	// Scheme Type: itun) which Chrome on Linux cannot decrypt and FFmpeg
 	// cannot process. Only the HLS path goes through proper CBCS decryption.
+	requestedHeight := req.MVMaxHeight
+	req.MVMaxHeight = capByRefusal(req.AssetID, req.MVMaxHeight)
+	if req.MVMaxHeight != requestedHeight {
+		log.Printf("[mv-quality] %s: requested %s, capped to %dp: the licence for a taller tier was refused earlier",
+			req.AssetID, qualityName(requestedHeight), req.MVMaxHeight)
+	}
 	videoURL, videoCodecs, videoResolution, selErr := master.SelectVideoVariantWithCodec(req.MVMaxHeight)
 	if selErr != nil {
 		return nil, fmt.Errorf("select video variant: %w", selErr)
 	}
 	mvlabel.Set(videoResolution)
+	if v, ok := master.VariantFor(videoURL); ok {
+		log.Printf("[mv-quality] %s: requested %s (limit %dp), selected %s %s range=%s hdcp=%q allowed key systems: %s",
+			req.AssetID, qualityName(requestedHeight), req.MVMaxHeight, videoResolution, videoCodecs, v.VideoRange,
+			v.HDCPLevel, hls.CPCSummary(v.AllowedCPC))
+		log.Printf("[mv-quality] %s: variants offered: %s", req.AssetID, describeVariants(master.Variants))
+	}
 	videoTrack := media.Track{
 		Kind:        pipeline.KindVideo,
 		Codec:       pipeline.CodecH264,
 		CodecString: videoCodecs,
-		Open:        makeAuthSeekableTrackOpener(lp, assetID, token, mut, videoURL, pipeline.KindVideo, pipeline.CodecH264),
+		Open: openVideoWithFallback(master, firstVideoVariant(master, videoURL, videoCodecs, videoResolution), assetID,
+			requestedHeight, func(v hls.Variant) func(context.Context) (*pipeline.Stream, error) {
+				return makeAuthSeekableTrackOpener(lp, assetID, token, mut, v.URL, pipeline.KindVideo, pipeline.CodecH264)
+			}),
 	}
 
 	sess := &media.Session{
@@ -379,7 +391,7 @@ func makeSeekableTrackOpenerWithAuth(
 	auth bool,
 ) func(context.Context) (*pipeline.Stream, error) {
 	return func(ctx context.Context) (*pipeline.Stream, error) {
-		log.Printf("[apple] %s: opening media playlist url=%s auth=%v", kind, playlistURL, auth)
+		vlog.Printf("[apple] %s: opening media playlist url=%s auth=%v", kind, playlistURL, auth)
 		var med *hls.Media
 		var err error
 		if auth {
@@ -391,13 +403,13 @@ func makeSeekableTrackOpenerWithAuth(
 			log.Printf("[apple] %s: open media playlist FAILED: %v", kind, err)
 			return nil, fmt.Errorf("open media playlist: %w", err)
 		}
-		log.Printf("[apple] %s: media playlist OK nSegs=%d enc=%v", kind, len(med.SegmentURLs), med.Encryption != nil)
+		vlog.Printf("[apple] %s: media playlist OK nSegs=%d enc=%v", kind, len(med.SegmentURLs), med.Encryption != nil)
 		var dec pipeline.Decryptor
 		if med.Encryption == nil {
 			log.Printf("[apple] %s %s: enc=nil → passthrough (no content-level encryption detected)", kind, playlistURL)
 			dec = fairplay.PassthroughDecryptor()
 		} else {
-			log.Printf("[apple] %s %s: enc detected prefix=%q → acquiring licence", kind, playlistURL, med.Encryption.URIPrefix)
+			vlog.Printf("[apple] %s %s: enc detected prefix=%q → acquiring licence", kind, playlistURL, med.Encryption.URIPrefix)
 			dec, err = lp.Open(ctx, fairplay.LicenseRequest{
 				AssetID:        assetID,
 				KIDBase64:      med.Encryption.KIDBase64,
@@ -406,6 +418,9 @@ func makeSeekableTrackOpenerWithAuth(
 				MediaUserToken: mut,
 			})
 			if err != nil {
+				log.Printf("[apple] %s %s: licence refused: method=%s keyformat=%q keys=%d uriPrefix=%q kidLen=%d: %v",
+					kind, assetID, med.Encryption.Method, med.Encryption.KeyFormat, med.Encryption.KeyCount,
+					med.Encryption.URIPrefix, len(med.Encryption.KIDBase64), err)
 				return nil, fmt.Errorf("acquire licence: %w", err)
 			}
 		}
@@ -416,12 +431,161 @@ func makeSeekableTrackOpenerWithAuth(
 			src = fairplay.HLSSeekableSource(med)
 		}
 		return &pipeline.Stream{
-			Source: src,
-			Stages: []pipeline.Stage{pipeline.DecryptStage(dec)},
-			Kind:   kind,
-			Codec:  codec,
+			Source:     src,
+			Stages:     []pipeline.Stage{pipeline.DecryptStage(dec)},
+			Kind:       kind,
+			Codec:      codec,
+			DurationMs: declaredDurationMs(med.SegmentDurations),
 		}, nil
 	}
+}
+
+// declaredDurationMs sums a media playlist's segment durations (seconds) into milliseconds; 0 when it declares none.
+func declaredDurationMs(segments []float64) int {
+	total := 0.0
+	for _, d := range segments {
+		if d > 0 {
+			total += d
+		}
+	}
+	return int(total*1000 + 0.5)
+}
+
+// firstVideoVariant is the variant the selection picked, with its details from the master when it lists it.
+func firstVideoVariant(master *hls.Master, url, codecs, resolution string) hls.Variant {
+	if v, ok := master.VariantFor(url); ok {
+		return v
+	}
+	return hls.Variant{URL: url, Codecs: codecs, Resolution: resolution}
+}
+
+// openVideoWithFallback opens the video track on first and, when the licence server refuses its key (a tier this
+// client may not play, such as 4K for a software Widevine identity), retries on the next lower variant until one opens
+// or none is left. The variant that opened sets the stream's codec string and the quality label, and the refusal is
+// remembered so a reopen of the same video does not repeat it.
+func openVideoWithFallback(
+	master *hls.Master,
+	first hls.Variant,
+	assetID string,
+	requestedHeight int,
+	opener func(hls.Variant) func(context.Context) (*pipeline.Stream, error),
+) func(context.Context) (*pipeline.Stream, error) {
+	return func(ctx context.Context) (*pipeline.Stream, error) {
+		v := first
+		for {
+			st, err := opener(v)(ctx)
+			if err == nil {
+				st.CodecString = v.Codecs
+				if v.URL != first.URL {
+					mvlabel.Set(v.Resolution)
+				}
+				log.Print(qualityLine(assetID, requestedHeight, first, v))
+				return st, nil
+			}
+			if !errors.Is(err, fairplay.ErrLicenceRefused) || ctx.Err() != nil {
+				return nil, err
+			}
+			rememberRefusal(assetID, v.Height())
+			next, ok := master.VideoFallback(v)
+			if !ok {
+				log.Printf("[mv-quality] %s: requested %s: NO PLAYABLE VARIANT, the licence was refused for every tier",
+					assetID, qualityName(requestedHeight))
+				return nil, err
+			}
+			log.Printf("[mv-quality] %s: licence refused for %s %s; trying %s %s",
+				assetID, v.Resolution, v.Codecs, next.Resolution, next.Codecs)
+			v = next
+		}
+	}
+}
+
+// describeVariants lists a master's video variants as height:codec:range:hdcp:[allowed key systems], tallest first, so a log shows which tiers
+// exist and what each one declares (HDCP-LEVEL says whether a tier demands output protection).
+func describeVariants(variants []hls.Variant) string {
+	out := make([]string, 0, len(variants))
+	seen := map[string]bool{}
+	for _, v := range variants {
+		if v.Height() == 0 {
+			continue
+		}
+		codec, _, _ := strings.Cut(v.Codecs, ",")
+		if i := strings.IndexByte(codec, '.'); i > 0 {
+			codec = codec[:i]
+		}
+		d := fmt.Sprintf("%dp:%s:%s:%s:[%s]", v.Height(), codec, v.VideoRange, v.HDCPLevel, hls.CPCSummary(v.AllowedCPC))
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		var a, b int
+		fmt.Sscanf(out[i], "%dp", &a)
+		fmt.Sscanf(out[j], "%dp", &b)
+		return a > b
+	})
+	return strings.Join(out, " ")
+}
+
+// qualityName names a requested maximum height the way the quality menu does: 2160 is 4K, the rest are NNNp.
+func qualityName(height int) string {
+	if height >= 2160 {
+		return "4K (2160p)"
+	}
+	return fmt.Sprintf("%dp", height)
+}
+
+// qualityLine is the one line that says what quality a music video was asked for and what it plays at. selected is
+// what the quality choice picked from the master; played is what actually opened, which differs after a fallback.
+func qualityLine(assetID string, requestedHeight int, selected, played hls.Variant) string {
+	line := fmt.Sprintf("[mv-quality] %s: requested %s -> PLAYING %s %s range=%s %.1f Mbps",
+		assetID, qualityName(requestedHeight), played.Resolution, played.Codecs, played.VideoRange,
+		float64(played.Bandwidth)/1e6)
+	if played.URL != selected.URL {
+		line += fmt.Sprintf(" (FELL BACK from %s %s: licence refused)", selected.Resolution, selected.Codecs)
+	} else if requestedHeight > 0 && played.Height() > 0 && played.Height() < requestedHeight {
+		line += " (the tallest this video offers within the request)"
+	}
+	return line
+}
+
+// refusals remembers, per video, the height whose licence was refused, so later opens start below it.
+var refusals sync.Map // assetID -> refusal
+
+type refusal struct {
+	height int
+	at     time.Time
+}
+
+const refusalTTL = time.Hour
+
+func rememberRefusal(assetID string, height int) {
+	if height <= 0 {
+		return
+	}
+	if prev, ok := refusals.Load(assetID); ok {
+		if r := prev.(refusal); time.Since(r.at) <= refusalTTL && r.height <= height {
+			return // keep the lower ceiling
+		}
+	}
+	refusals.Store(assetID, refusal{height: height, at: time.Now()})
+}
+
+// capByRefusal lowers a requested maximum height to just below one whose licence was refused for this video recently.
+func capByRefusal(assetID string, maxHeight int) int {
+	v, ok := refusals.Load(assetID)
+	if !ok {
+		return maxHeight
+	}
+	r := v.(refusal)
+	if time.Since(r.at) > refusalTTL {
+		refusals.Delete(assetID)
+		return maxHeight
+	}
+	if maxHeight >= r.height {
+		return r.height - 1
+	}
+	return maxHeight
 }
 
 // makeCBCSTrackOpener returns the Track.Open func for a FairPlay CBCS track
@@ -442,10 +606,20 @@ func (p *appleMusicProvider) makeCBCSTrackOpener(
 		if err != nil {
 			return nil, fmt.Errorf("open CBCS media playlist: %w", err)
 		}
+		// Pre-warm the track's FairPlay key in the background so the key exchange
+		// overlaps the CDN init-segment download instead of following it.
+		if firstKey := fairplay.FirstAudioKeyURI(cbcsMedia.KeyURIs); firstKey != "" {
+			go fairplay.WarmCBCSKey(context.Background(), dialer, assetID, firstKey)
+		}
+		// The file's own length wins over the catalog's: it is stored in the moov (the player reports it) and is
+		// where the stream really ends.
+		declared := declaredDurationMs(cbcsMedia.SegmentDurations)
+		durationMs = media.ReconcileDurationMs(durationMs, declared)
 		return &pipeline.Stream{
-			Source: fairplay.CBCSSeekableSource(assetID, dialer, cbcsMedia, durationMs),
-			Kind:   kind,
-			Codec:  codec,
+			Source:     fairplay.CBCSSeekableSource(assetID, dialer, cbcsMedia, durationMs),
+			Kind:       kind,
+			Codec:      codec,
+			DurationMs: declared,
 		}, nil
 	}
 }
@@ -455,10 +629,14 @@ func (p *appleMusicProvider) makeCBCSTrackOpener(
 // fetchWebplayback posts to Apple's webplayback endpoint and returns the raw
 // response body.  Both webplaybackURL (MV master) and webplaybackAssetURL
 // (song CTR asset) call this to avoid duplicating the HTTP logic.
-func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, token, mut string) ([]byte, error) {
+func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, storefront, token, mut string) ([]byte, error) {
 	tracer.FromContext(ctx).RecordWebplaybackStart()
 	defer tracer.FromContext(ctx).RecordWebplaybackEnd()
-	body, _ := json.Marshal(map[string]string{"salableAdamId": adamID})
+	reqBody := map[string]string{"salableAdamId": adamID}
+	if storefront != "" && storefront != "us" {
+		reqBody["country"] = strings.ToUpper(storefront)
+	}
+	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",
 		bytes.NewReader(body))
@@ -484,8 +662,8 @@ func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, token
 }
 
 // webplaybackURL returns the HLS master playlist URL for a music video.
-func (p *appleMusicProvider) webplaybackURL(ctx context.Context, adamID, token, mut string) (string, error) {
-	raw, err := p.fetchWebplayback(ctx, adamID, token, mut)
+func (p *appleMusicProvider) webplaybackURL(ctx context.Context, adamID, storefront, token, mut string) (string, error) {
+	raw, err := p.fetchWebplayback(ctx, adamID, storefront, token, mut)
 	if err != nil {
 		return "", err
 	}
@@ -507,8 +685,8 @@ func (p *appleMusicProvider) webplaybackURL(ctx context.Context, adamID, token, 
 // from Apple's webplayback assets list.  For standard AAC songs, use flavor
 // "28:ctrp256" — its media playlist carries URI="data:;base64,[kid]" in
 // EXT-X-KEY, which the HLS parser and Widevine license provider both handle.
-func (p *appleMusicProvider) webplaybackAssetURL(ctx context.Context, adamID, token, mut string, flavor AssetFlavor) (string, error) {
-	raw, err := p.fetchWebplayback(ctx, adamID, token, mut)
+func (p *appleMusicProvider) webplaybackAssetURL(ctx context.Context, adamID, storefront, token, mut string, flavor AssetFlavor) (string, error) {
+	raw, err := p.fetchWebplayback(ctx, adamID, storefront, token, mut)
 	if err != nil {
 		return "", err
 	}

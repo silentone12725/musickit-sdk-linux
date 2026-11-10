@@ -14,8 +14,8 @@ package aacstream
 import (
 	"container/list"
 	"crypto/sha256"
-	"errors"
 	"fmt"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/appdir"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,38 +49,16 @@ func newSegmentCache(maxBytes int64) *SegmentCache {
 }
 
 // The cache directories are created on first use, not when the package is imported:
-// importing the SDK must not touch the user's home. SetCacheBaseDir picks where they go.
-var (
-	cacheBaseMu   sync.Mutex
-	cacheBase     string
-	cacheDirsOnce sync.Once
-	cacheDirsUsed bool
-)
-
-// SetCacheBaseDir sets the directory under which the segment and MV caches keep their
-// files (default: the user cache directory). It must be called before the caches are first
-// used, and reports an error afterwards.
-func SetCacheBaseDir(dir string) error {
-	cacheBaseMu.Lock()
-	defer cacheBaseMu.Unlock()
-	if cacheDirsUsed {
-		return errors.New("aacstream: SetCacheBaseDir called after the caches were first used")
-	}
-	cacheBase = dir
-	return nil
-}
+// importing the SDK must not touch the user's home.
+var cacheDirsOnce sync.Once
 
 func ensureCacheDirs() {
 	cacheDirsOnce.Do(func() {
-		cacheBaseMu.Lock()
-		cacheDirsUsed = true
-		base := cacheBase
-		cacheBaseMu.Unlock()
-		if base == "" {
-			var err error
-			if base, err = os.UserCacheDir(); err != nil {
-				base = os.TempDir()
-			}
+		base := appdir.Cache()
+		// Earlier versions kept these caches directly under the OS cache root.
+		if old, err := os.UserCacheDir(); err == nil {
+			appdir.MoveInto(filepath.Join(old, cacheDirName), filepath.Join(base, cacheDirName))
+			appdir.MoveInto(filepath.Join(old, mvCacheDirName), filepath.Join(base, mvCacheDirName))
 		}
 		if segmentCache.dir == "" {
 			segmentCache.dir = filepath.Join(base, cacheDirName)
@@ -302,13 +280,6 @@ func (c *SegmentCache) WarmFromDisk() {
 	}
 }
 
-// CacheStats returns hit and miss counts.
-func CacheStats() (hits, misses int64) {
-	segmentCache.mu.Lock()
-	defer segmentCache.mu.Unlock()
-	return segmentCache.Hits, segmentCache.Misses
-}
-
 // GetCachedSegment is the public entrypoint used by downloadAndAssemble.
 func GetCachedSegment(url string) ([]byte, bool) {
 	return segmentCache.Get(url)
@@ -326,12 +297,6 @@ func WarmCache() {
 	go mvSegmentCache.WarmFromDisk()
 }
 
-// SetCacheMaxBytes overrides the default cache size limit.
-// Call before any downloads begin.
-func SetCacheMaxBytes(n int64) {
-	segmentCache.maxBytes.Store(n)
-}
-
 // ── MV video segment cache ────────────────────────────────────────────────────
 
 // GetCachedMVSegment returns a cached MV video segment, or (nil, false).
@@ -346,14 +311,7 @@ func PutCachedMVSegment(url string, data []byte) {
 
 // SetMVCacheMaxBytes sets the MV cache capacity. Pass 0 to disable.
 func SetMVCacheMaxBytes(n int64) {
-	mvSegmentCache.maxBytes.Store(n)
-}
-
-// MVCacheStats returns hit/miss counts for the MV segment cache.
-func MVCacheStats() (hits, misses int64) {
-	mvSegmentCache.mu.Lock()
-	defer mvSegmentCache.mu.Unlock()
-	return mvSegmentCache.Hits, mvSegmentCache.Misses
+	mvSegmentCache.maxBytes.Store(max(n, 0)) // 0 disables; a negative would half-enable it
 }
 
 // MVCacheEnabled reports whether the MV cache is active (maxBytes > 0).

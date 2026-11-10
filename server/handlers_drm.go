@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/silentone12725/musickit-sdk-linux/sdk/drm"
@@ -14,6 +16,9 @@ import (
 // and session age metadata for proactive refresh coordination.
 type drmStatusResponse struct {
 	drm.DRMSnapshot
+	// Available is false when this build has no DRM layer (built without adamplay_backend): the session can
+	// never become ready, which the other fields cannot tell apart from "not ready yet".
+	Available    bool          `json:"available"`
 	Backend      backendStatus `json:"backend"`
 	ReadySinceMs int64         `json:"readySinceMs,omitempty"`
 	SessionAgeMs int64         `json:"sessionAgeMs,omitempty"`
@@ -32,6 +37,7 @@ func (s *APIServer) handleDRMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := drmStatusResponse{
 		DRMSnapshot: snap,
+		Available:   s.dm != nil,
 		Backend:     backendStatus{Selected: s.backendName},
 	}
 	if since := s.lifecycle.DRMReadySince(); !since.IsZero() {
@@ -60,11 +66,20 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "DRM backend not available — drm binary not found at startup", http.StatusServiceUnavailable)
 		return
 	}
+	if d := s.dm.SignInPausedFor(); d > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))
+		http.Error(w, (&drm.SignInPausedError{Until: time.Now().Add(d)}).Error(), http.StatusTooManyRequests)
+		return
+	}
+	if s.dm.SignInRunning() {
+		http.Error(w, drm.ErrSignInRunning.Error(), http.StatusConflict)
+		return
+	}
 	go func() {
-		// Use context.Background: r.Context() is cancelled the moment the 202
-		// response is written, which would abort the login mid-flight.
-		// Authentication is long-running; progress arrives via SSE instead.
-		if err := s.dm.Authenticate(context.Background(), drm.Credentials{
+		// Not r.Context(): that is cancelled the moment the 202 response is written,
+		// which would abort the login mid-flight. The server's shutdown context still
+		// ends it on exit. Progress arrives via SSE.
+		if err := s.dm.Authenticate(s.shutdownCtx, drm.Credentials{
 			Email:    req.Email,
 			Password: req.Password,
 		}); err != nil {
@@ -108,11 +123,7 @@ func (s *APIServer) handleDRMLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.dm.Logout(r.Context()); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.dm.Status())
+	s.writeSignOut(w, s.dm.Logout)
 }
 
 func (s *APIServer) handleDRMClearSession(w http.ResponseWriter, r *http.Request) {
@@ -120,9 +131,38 @@ func (s *APIServer) handleDRMClearSession(w http.ResponseWriter, r *http.Request
 		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.dm.ClearSession(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// The same full sign-out as POST /drm/logout: clearing the files while the
+	// backend runs would leave the account signed in inside the Android libraries.
+	s.writeSignOut(w, s.dm.Logout)
+}
+
+type signOutResponse struct {
+	drm.DRMSnapshot
+	ServerSignOut string `json:"serverSignOut"`
+}
+
+// writeSignOut runs a sign-out and answers. When the sign-out must finish in the
+// next process, the answer is flushed first and then the engine exits; the Electron
+// lifecycle restarts it and the new process completes the recorded sign-out.
+func (s *APIServer) writeSignOut(w http.ResponseWriter, run func(context.Context) (drm.SignOutResult, error)) {
+	res, err := run(s.shutdownCtx)
+	status := http.StatusOK
+	if err != nil {
+		status = http.StatusInternalServerError
+	}
+	writeJSON(w, status, signOutResponse{DRMSnapshot: s.dm.Status(), ServerSignOut: res.ServerSignOut})
+	if res.Restart {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		go func() { time.Sleep(200 * time.Millisecond); os.Exit(3) }()
+	}
+}
+
+func (s *APIServer) handleDRMForgetDevice(w http.ResponseWriter, r *http.Request) {
+	if s.dm == nil {
+		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	s.writeSignOut(w, s.dm.ForgetDevice)
 }

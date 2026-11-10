@@ -31,11 +31,12 @@ Two control events tell a client to resynchronise. `replay.truncated` follows th
 
 | Method | Path | Body | Description |
 |---|---|---|---|
-| GET | `/drm/status` | — | DRM snapshot (process, manager, authentication, FairPlay, session, recovery state), selected backend, session age and TTL |
-| POST | `/drm/authenticate` | `{"email","password"}` | Start a login (max 4 KB). `202` with the DRM snapshot; `503` when the DRM backend is unavailable |
+| GET | `/drm/status` | — | DRM snapshot (process, manager, authentication, FairPlay, session, recovery state), selected backend, session age and TTL. `available` is `false` when the build has no DRM layer |
+| POST | `/drm/authenticate` | `{"email","password"}` | Start a login (max 4 KB). `202` with the DRM snapshot; `409` while another sign-in is running; `429` with `Retry-After` after repeated failures; `503` when the DRM backend is unavailable |
 | POST | `/drm/challenge` | `{"reply"}` | Answer a pending 2FA challenge. `200` with the DRM snapshot; `409` if no challenge is pending or the reply is rejected |
-| POST | `/drm/logout` | — | Sign out; `200` with the DRM snapshot |
-| DELETE | `/drm/session` | — | Drop the stored session; `204` |
+| POST | `/drm/logout` | — | Sign out and keep the device identity; `200` with the DRM snapshot plus `serverSignOut`. If the sign-out must finish in the next process the engine answers, then exits with status 3 so its supervisor can start it again |
+| DELETE | `/drm/session` | — | Same sign-out as `/drm/logout` |
+| POST | `/drm/forget-device` | — | Sign out and also drop the device identity, so the next sign-in is treated as a new device (Apple asks for a verification code) |
 
 ## Playback
 
@@ -48,6 +49,7 @@ Two control events tell a client to resynchronise. `replay.truncated` follows th
 | GET | `/playback/{id}/vseg/manifest`, `init`, `seg/{n}`, `seek?t=<seconds>` | Segmented video for MSE players (evolving). `seek` requires `t` ≥ 0 and returns `{n, t}`, plus `direct`, `tsOffset` and `reinit` for fragment-level seeks (see [architecture.md](architecture.md#mv-seeking)); `?direct=0` forces the FFmpeg path |
 | DELETE | `/playback/{id}/vseg` | Stop a segmented-video producer |
 | POST | `/playback/{id}/precache` | Warm a session's audio into the cache |
+| POST | `/playback/{id}/touch` | Keep a session alive while the client still has it open; `204`, or `404` when it is gone |
 | DELETE | `/playback/{id}` | Release a session |
 | PUT | `/playback/context` | Tell the engine the current queue so the prefetcher can warm upcoming tracks. Returns `202 {"jobId"}` |
 | GET / DELETE | `/jobs/{id}` | Inspect (job snapshot) or cancel (`204`) a cache-warm job |

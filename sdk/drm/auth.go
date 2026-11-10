@@ -24,16 +24,20 @@ import (
 // For 2FA and device-approval challenges, Challenge blocks until SubmitReply.
 type AuthCoordinator struct {
 	stored  Credentials
-	replies chan string // SubmitReply sends here; Challenge reads here
+	pending chan string // non-nil only while a challenge awaits a reply
 	mu      sync.Mutex
 	emitter func(DRMSnapshot) // set by DRMManager to emit snapshots to SSE
+	seq     uint64            // numbers each announced challenge (AuthChallenge.ID)
+	// cancelPending ends the challenge waiting in pending; aborted makes further
+	// verification-code challenges fail at once until the next SetCredentials.
+	cancelPending context.CancelFunc
+	aborted       bool
 }
 
 // NewAuthCoordinator creates an AuthCoordinator.
 // emitter is called to broadcast challenge snapshots to SSE clients.
 func NewAuthCoordinator(emitter func(DRMSnapshot)) *AuthCoordinator {
 	return &AuthCoordinator{
-		replies: make(chan string, 1),
 		emitter: emitter,
 	}
 }
@@ -43,18 +47,57 @@ func NewAuthCoordinator(emitter func(DRMSnapshot)) *AuthCoordinator {
 func (a *AuthCoordinator) SetCredentials(creds Credentials) {
 	a.mu.Lock()
 	a.stored = creds
+	a.aborted = false
 	a.mu.Unlock()
+}
+
+// ClearCredentials forgets the stored credentials once a sign-in attempt is over, so a
+// later request for credentials cannot silently resubmit an old password.
+func (a *AuthCoordinator) ClearCredentials() {
+	a.mu.Lock()
+	a.stored = Credentials{}
+	a.mu.Unlock()
+}
+
+// Abort ends a sign-in in progress: it forgets the stored credentials, ends a
+// pending verification-code challenge (the backend gets no code and that sign-in
+// attempt fails) and refuses further code challenges until SetCredentials is
+// called again. Logout calls it first, because stopping the backend waits for a
+// sign-in that is blocked on a challenge.
+func (a *AuthCoordinator) Abort() {
+	a.mu.Lock()
+	a.stored = Credentials{}
+	a.aborted = true
+	cancel := a.cancelPending
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // SubmitReply delivers a challenge reply from the browser (e.g. a 2FA code).
 // Returns an error if no challenge is currently pending.
 func (a *AuthCoordinator) SubmitReply(reply string) error {
-	select {
-	case a.replies <- reply:
-		return nil
-	default:
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending == nil {
 		return fmt.Errorf("no authentication challenge pending")
 	}
+	select {
+	case a.pending <- reply:
+		// A challenge accepts exactly one reply.
+		a.pending = nil
+		return nil
+	default:
+		return fmt.Errorf("authentication challenge already answered")
+	}
+}
+
+// Pending reports whether the backend is waiting for user input.
+func (a *AuthCoordinator) Pending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pending != nil
 }
 
 // Challenge implements AuthSource. Called by the backend when input is needed.
@@ -87,12 +130,37 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		return "\x00", nil
 	}
 
-	// Drain any stale reply BEFORE announcing the challenge: draining after
-	// would discard a reply the browser sends right after the announcement.
-	select {
-	case <-a.replies:
-	default:
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
+	// Each challenge gets its own reply channel, registered before it is announced, so a reply
+	// the browser sends right after the announcement is accepted and a stale or duplicate one
+	// (no challenge pending, or already answered) is rejected.
+	replies := make(chan string, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.mu.Lock()
+	if a.aborted {
+		a.mu.Unlock()
+		return "", fmt.Errorf("sign-in cancelled")
+	}
+	if a.pending != nil {
+		a.mu.Unlock()
+		return "", fmt.Errorf("authentication challenge already pending")
+	}
+	a.pending = replies
+	a.cancelPending = cancel
+	a.seq++
+	req.ID = a.seq
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.pending == replies {
+			a.pending = nil
+			a.cancelPending = nil
+		}
+		a.mu.Unlock()
+	}()
 
 	// Emit challenge to SSE so the browser knows to prompt the user.
 	if a.emitter != nil {
@@ -104,7 +172,12 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 
 	// Wait for the browser to call SubmitReply.
 	select {
-	case reply := <-a.replies:
+	case reply := <-replies:
+		// Answered: drop the challenge from the snapshot while Apple checks the
+		// reply, so a reloaded page does not ask for the same code again.
+		if a.emitter != nil {
+			a.emitter(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}})
+		}
 		return reply, nil
 	case <-ctx.Done():
 		return "", ctx.Err()

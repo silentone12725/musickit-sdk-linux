@@ -26,6 +26,17 @@
 
 On Windows the DLL needs `libcrypto-3-x64.dll` and `libwinpthread-1.dll` from the MSYS2 UCRT64 `bin/` directory beside it.
 
+## Optional: Apple's Android libraries
+
+Nothing from Apple is bundled with this repository. A backend that runs Apple's Android FairPlay libraries (the application's hybris backend, for example) needs them on disk; the built-in Widevine backend does not. `scripts/fetch-fairplay-libs.sh` downloads them from the sources pinned in `drm/fairplay-libs.lock`, refuses any file whose SHA-256 differs, and skips files that are already current:
+
+```sh
+scripts/fetch-fairplay-libs.sh                    # to ~/.config/musickit-sdk-linux/drm/rootfs/system/lib64
+scripts/fetch-fairplay-libs.sh --dest DIR --quiet
+```
+
+It exits 0 only when every library is in place and verified. `drm/rootfs/` is git-ignored: never commit the downloaded files.
+
 ## Failure modes
 
 | Log line | Meaning |

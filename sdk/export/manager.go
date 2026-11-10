@@ -57,6 +57,10 @@ type Options struct {
 	// means unrestricted, which is only appropriate when every caller is trusted —
 	// the HTTP server sets it, because request bodies come from a web page.
 	OutputRoots []string
+	// MoreRoots, when non-nil, is consulted on every check for roots added after
+	// start-up (the folder the user picked in a native dialog). It must read from a
+	// source the web page cannot write.
+	MoreRoots func() []string
 }
 
 // Manager enqueues and executes export jobs one at a time: highest priority
@@ -77,7 +81,9 @@ type Manager struct {
 	run      func(*workItem) // test seam; nil means m.execute
 	seq      atomic.Int64    // monotonically increasing enqueue counter
 	roots    []string        // resolved OutputRoots
+	more     func() []string // Options.MoreRoots
 	confined bool            // OutputRoots was set (even if nothing resolved: then nothing is allowed)
+	active   sync.WaitGroup  // the worker and every post-process goroutine, joined by Stop
 }
 
 type workItem struct {
@@ -101,6 +107,7 @@ func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
 	}
 	m := &Manager{
 		roots:    roots,
+		more:     opts.MoreRoots,
 		confined: len(opts.OutputRoots) > 0,
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
@@ -114,7 +121,11 @@ func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
 		stats = pm.ForegroundStats
 	}
 	m.bw = newBWController(stats, float64(opts.FloorBps))
-	go m.worker()
+	m.active.Add(1)
+	go func() {
+		defer m.active.Done()
+		m.worker()
+	}()
 	return m
 }
 
@@ -138,6 +149,11 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	if req.OutputDir == "" {
 		req.OutputDir = defaultOutputDir()
 	}
+	absDir, err := normalizeOutputDir(req.OutputDir)
+	if err != nil {
+		return nil, err
+	}
+	req.OutputDir = absDir
 	if err := m.checkOutputDir(req.OutputDir); err != nil {
 		return nil, err
 	}
@@ -188,15 +204,32 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	return job, nil
 }
 
-// Stop closes the export queue and cancels every job, so a running export
-// stops downloading/transcoding during engine shutdown instead of racing it.
-// It does not wait for the worker. No new jobs should be enqueued afterwards.
+// stopWait bounds how long Stop waits for running exports to end. Cancelled jobs
+// stop their VLC/FFmpeg children (SIGTERM, then a kill after toolStopGrace), so
+// this stays under the Electron lifecycle's kill delay; a variable so a test can
+// lower it.
+var stopWait = 2500 * time.Millisecond
+
+// Stop closes the export queue, cancels every job (which also stops their VLC and
+// FFmpeg children) and waits, bounded by stopWait, for the worker and every
+// post-process goroutine, so no child keeps writing after the engine exits. No new
+// jobs should be enqueued afterwards.
 func (m *Manager) Stop() {
 	m.queue.Close()
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	for _, j := range m.jobs {
 		j.cancel()
+	}
+	m.mu.RUnlock()
+	done := make(chan struct{})
+	go func() {
+		m.active.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(stopWait):
+		log.Printf("export: stop timed out after %v with work still running", stopWait)
 	}
 }
 
@@ -639,7 +672,11 @@ func (m *Manager) execute(item *workItem) {
 
 	// ctx is the job's own context (not an HTTP request's), so post-processing
 	// already survives client disconnects; keeping it lets Cancel/Stop end it.
-	go m.runPostProcess(ctx, req, job, meta, tmpPath, finalPath)
+	m.active.Add(1)
+	go func() {
+		defer m.active.Done()
+		m.runPostProcess(ctx, req, job, meta, tmpPath, finalPath)
+	}()
 }
 
 // downloadToTemp opens a playback session, streams to a temp file, and returns
@@ -763,7 +800,7 @@ func (m *Manager) streamVideoAudio(ctx context.Context, req ExportRequest, job *
 	if ffPath == "" {
 		ffPath = "ffmpeg"
 	}
-	if err := muxVideoAudio(ffPath, videoTmp, audioTmp, tmpPath); err != nil {
+	if err := muxVideoAudio(ctx, ffPath, videoTmp, audioTmp, tmpPath); err != nil {
 		os.Remove(videoTmp)
 		os.Remove(audioTmp)
 		m.fail(job, fmt.Errorf("mux video+audio: %w (ffmpeg required)", err))
@@ -789,7 +826,7 @@ func fetchMVLyrics(ctx context.Context, sf, assetID, lang, token, mut, tmpPath s
 			if ffPath == "" {
 				ffPath = "ffmpeg"
 			}
-			if serr := addSubtitleTrack(ffPath, tmpPath, srtTmp); serr != nil {
+			if serr := addSubtitleTrack(ctx, ffPath, tmpPath, srtTmp); serr != nil {
 				log.Printf("export %s: subtitle embed warning: %v", assetID, serr)
 			}
 			os.Remove(srtTmp)
@@ -873,14 +910,15 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 		return
 	}
 	m.advance(job, PhaseMoving, 96)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		if err2 := copyFile(tmpPath, finalPath); err2 != nil {
-			os.Remove(tmpPath) //nolint:errcheck
-			m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err2))
-			return
-		}
+	// The existence check in Phase 2 ran long ago and another job may have
+	// produced the same file since, so the policy is enforced atomically here.
+	dest, err := moveNoClobber(tmpPath, finalPath, req.Options.OverwritePolicy)
+	if err != nil {
 		os.Remove(tmpPath) //nolint:errcheck
+		m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err))
+		return
 	}
+	finalPath = dest
 	m.setOutput(job, finalPath)
 	m.advance(job, PhaseDone, 100)
 }
@@ -950,15 +988,15 @@ func convertFLAC(ctx context.Context, req ExportRequest, meta TrackMeta, tmpPath
 	converted := false
 	if hasVLC {
 		rawFlac := flacTmp + ".raw.flac"
-		if err := runVLCToFLAC(vlcBin, tmpPath, rawFlac); err != nil {
+		if err := runVLCToFLAC(ctx, vlcBin, tmpPath, rawFlac); err != nil {
 			log.Printf("export %s: vlc transcode failed: %v — trying ffmpeg", req.AssetID, err)
 			os.Remove(rawFlac) //nolint:errcheck
 		} else {
 			artArg := downloadArtworkToTemp(ctx, req, meta, rawFlac)
-			if tagErr := tagFLAC(ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
+			if tagErr := tagFLAC(ctx, ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
 				log.Printf("export %s: flac tag failed: %v — retrying without art", req.AssetID, tagErr)
 				os.Remove(flacTmp) //nolint:errcheck
-				if tagErr2 := tagFLAC(ffpathFlac, rawFlac, "", flacTmp, meta); tagErr2 != nil {
+				if tagErr2 := tagFLAC(ctx, ffpathFlac, rawFlac, "", flacTmp, meta); tagErr2 != nil {
 					log.Printf("export %s: flac tag failed (no art): %v — keeping raw", req.AssetID, tagErr2)
 					if renErr := os.Rename(rawFlac, flacTmp); renErr != nil {
 						os.Remove(rawFlac) //nolint:errcheck
@@ -980,7 +1018,7 @@ func convertFLAC(ctx context.Context, req ExportRequest, meta TrackMeta, tmpPath
 		}
 	}
 	if !converted {
-		if err := runFFmpeg(ffpathFlac, tmpPath, "", flacTmp, meta); err != nil {
+		if err := runFFmpeg(ctx, ffpathFlac, tmpPath, "", flacTmp, meta); err != nil {
 			log.Printf("export %s: flac conversion failed: %v — keeping .m4a", req.AssetID, err)
 			finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
 		} else {
@@ -1110,6 +1148,11 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 		if cerr := f.Close(); copyErr == nil {
 			copyErr = cerr
 		}
+		// Windows cannot delete a file that is still open, so a cancelled or failed copy removes
+		// the temp file here, after the close, as well as in the caller.
+		if copyErr != nil || ctx.Err() != nil {
+			os.Remove(tmpPath)
+		}
 		done <- copyErr
 	}()
 	select {
@@ -1122,6 +1165,10 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 		// next write and self-exit.
 		r.Close()
 		err = ctx.Err()
+		select { // give the goroutine a moment to close f, so the file can be removed on Windows
+		case <-done:
+		case <-time.After(time.Second):
+		}
 	}
 	if err != nil {
 		os.Remove(tmpPath)
@@ -1161,6 +1208,11 @@ func (m *Manager) setSource(job *ExportJob, src string) {
 
 func (m *Manager) advance(job *ExportJob, phase Phase, pct int) {
 	m.mu.Lock()
+	// A late update from a goroutine that lost a race (cancel, failure) must not revive or rewind a job.
+	if !canTransition(job.Phase, phase) {
+		m.mu.Unlock()
+		return
+	}
 	job.Phase = phase
 	job.Percent = pct
 	job.UpdatedAt = time.Now()
@@ -1172,6 +1224,10 @@ func (m *Manager) advance(job *ExportJob, phase Phase, pct int) {
 // ends in PhaseCancelled rather than PhaseFailed.
 func (m *Manager) fail(job *ExportJob, err error) {
 	m.mu.Lock()
+	if job.Phase.IsTerminal() { // already finished: a late error must not overwrite the outcome
+		m.mu.Unlock()
+		return
+	}
 	job.Phase = PhaseFailed
 	if job.ctx != nil && job.ctx.Err() != nil {
 		job.Phase = PhaseCancelled
@@ -1212,21 +1268,35 @@ func newExportID() string {
 	return hex.EncodeToString(b)
 }
 
+// copyFile copies src to dst through a temp file in dst's directory and renames
+// it into place, so a failure never leaves a partial dst or damages an existing one.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.CreateTemp(filepath.Dir(dst), ".am-copy-*")
 	if err != nil {
 		return err
 	}
-	if _, err = io.Copy(out, in); err != nil {
-		out.Close()
-		return err
+	name := out.Name()
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Sync()
 	}
-	return out.Close()
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(name, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(name, dst)
+	}
+	if err != nil {
+		os.Remove(name) //nolint:errcheck
+	}
+	return err
 }
 
 // errFFmpegUnavailable is returned when ffmpeg is not on PATH.

@@ -34,11 +34,13 @@ package server
 //   GET    /api/v1/lyrics/{id}?sf=
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -46,12 +48,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/silentone12725/musickit-sdk-linux/sdk/ampapi"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/appdir"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/apple"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/diskcache"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/drm"
@@ -77,9 +81,21 @@ var artworkClient = &http.Client{
 
 // drmAccountAdapter adapts *drm.DRMManager to apple.AccountTokenSource so the
 // apple package stays decoupled from the drm package's concrete types.
-type drmAccountAdapter struct{ dm *drm.DRMManager }
+//
+// getMUT is the APIServer's musicUserToken() method. It checks the in-memory
+// MK token pushed at startup first, then falls back to the DRM session file,
+// so lossless/ALAC works from the web-player session without a MUSIC_TOKEN file.
+type drmAccountAdapter struct {
+	dm     *drm.DRMManager
+	getMUT func() string
+}
 
 func (a *drmAccountAdapter) GetMusicToken(ctx context.Context) (devToken, musicToken string, err error) {
+	// Prefer the in-memory MK token (pushed by the renderer at startup).
+	if mut := a.getMUT(); mut != "" {
+		devTok, err := a.dm.GetAccount(ctx)
+		return devTok.DevToken, mut, err
+	}
 	info, err := a.dm.GetAccount(ctx)
 	return info.DevToken, info.MusicToken, err
 }
@@ -106,6 +122,7 @@ type PlaybackRequest struct {
 	MUT          string `json:"mediaUserToken"`
 	Capabilities struct {
 		Lossless bool `json:"lossless"`
+		HiRes    bool `json:"hiRes"` // true = hi-res ALAC permitted; false = cap at 44100/16-bit
 		Video    bool `json:"video"`
 		Atmos    bool `json:"atmos"`
 	} `json:"capabilities"`
@@ -463,6 +480,7 @@ type APIServer struct {
 	alac        *alacGate           // parks background ALAC downloads while the player's track starts
 	libStore    *library.Store      // local library metadata cache (songs, playlists)
 	vlcPlayer   *vlc.Player         // nil when libvlc is not available
+	vlcGate     vlcGate             // session that currently owns vlcPlayer
 
 	tokenMu     sync.RWMutex
 	cachedToken string // bearer token cached from the most recent browser request
@@ -492,6 +510,7 @@ type ServerConfig struct {
 // NewAPIServer wires all routes.
 func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	initMVPrefs()
+	listenPort.Store(int32(port))
 	epoch := newEpochManager()
 	shutCtx, shutStop := context.WithCancel(context.Background())
 	s := &APIServer{
@@ -569,13 +588,24 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 				}
 				s.events.emit("drm", snap)
 			},
-			drm.BackendConfig{BaseDir: drmBaseDir, DisableHiRes: os.Getenv("MUSICKIT_DISABLE_HIRES") == "1"},
+			drm.BackendConfig{
+				BaseDir:       drmBaseDir,
+				DisableHiRes:  os.Getenv("MUSICKIT_DISABLE_HIRES") == "1",
+				GetMusicToken: s.musicUserToken,
+			},
 			drm.DefaultRestartPolicy,
 		)
 	} else {
 		slog.Warn("DRM backend unavailable (widevine_backend build tag not set); DRM features disabled")
 	}
 	s.session = drmSession
+	if s.dm != nil {
+		// The web player's token counts as the account: no separate DRM sign-in exists.
+		s.dm.SetWebSession(s.webSessionTokens)
+		// Supply the MUT source so NoteWebSession can write MUSIC_TOKEN and start the
+		// backend when it was created before the page loaded.
+		s.dm.SetMUTSource(s.musicUserToken)
+	}
 	s.drmReady = drmBackend != nil
 	s.sessionDir = drmBaseDir
 
@@ -593,7 +623,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	var acctSource apple.AccountTokenSource
 	if s.dm != nil {
 		cbcsDialer = s.dm
-		acctSource = &drmAccountAdapter{s.dm}
+		acctSource = &drmAccountAdapter{dm: s.dm, getMUT: s.musicUserToken}
 	}
 	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(cbcsDialer, acctSource))
 	s.installReleaseHook()
@@ -602,7 +632,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// so token rotations are picked up automatically.
 	// Use ev.Kind as the SSE event name so clients can subscribe to specific
 	// phases (prefetch.cached, prefetch.done, …) without filtering JSON.
-	s.scheduler = prefetch.NewScheduler(s.pm, s.token, s.mediaUserToken, func(ev prefetch.Event) {
+	s.scheduler = prefetch.NewScheduler(s.pm, s.token, s.musicUserToken, func(ev prefetch.Event) {
 		s.events.emit(string(ev.Kind), ev)
 	}, prefetch.DefaultWorkers)
 	go func() {
@@ -626,8 +656,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// Disk cache — decrypted per-track audio; falls back gracefully on error.
 	// Limits (persistLimitMB, persistTTLDays) are pushed by the frontend on
 	// startup via PUT /api/v1/cache/config; zero means unlimited / no TTL.
-	if cacheBase, err := os.UserCacheDir(); err == nil {
-		if dc, err := diskcache.New(filepath.Join(cacheBase, "musickit-sdk-linux", "playback")); err == nil {
+	if cacheBase := appdir.Cache(); cacheBase != "" {
+		if dc, err := diskcache.New(filepath.Join(cacheBase, "playback")); err == nil {
 			s.diskCache = dc
 			s.alac = newALACGate()
 			go func() {
@@ -645,7 +675,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		}
 
 		// Library metadata cache — songs + playlist membership for instant queue ops.
-		libCacheDir := filepath.Join(cacheBase, "musickit-sdk-linux")
+		libCacheDir := cacheBase
 		if err := os.MkdirAll(libCacheDir, 0o700); err == nil { // holds library.key
 			s.libStore = library.New(libCacheDir)
 			// Auto-sync removed: the Go-side API client cannot authenticate with
@@ -661,7 +691,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
-	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10, OutputRoots: exportRoots()})
+	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10, OutputRoots: exportRoots(), MoreRoots: pickedExportRoots})
 
 	mux := http.NewServeMux()
 
@@ -691,6 +721,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/seek", cors(s.handlePlaybackVsegSeek))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}/vseg", cors(s.handlePlaybackVsegStop))
 	mux.HandleFunc("POST /api/v1/playback/{id}/precache", cors(s.handlePlaybackPrecache))
+	mux.HandleFunc("POST /api/v1/playback/{id}/touch", cors(s.handlePlaybackTouch))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}", cors(s.handleDeletePlayback))
 
 	// Playback context — renderer signals user intent; scheduler decides what to warm.
@@ -727,6 +758,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("POST /api/v1/drm/challenge", cors(s.handleDRMChallenge))
 	mux.HandleFunc("POST /api/v1/drm/logout", cors(s.handleDRMLogout))
 	mux.HandleFunc("DELETE /api/v1/drm/session", cors(s.handleDRMClearSession))
+	mux.HandleFunc("POST /api/v1/drm/forget-device", cors(s.handleDRMForgetDevice))
 
 	// Library — local metadata cache (songs, playlists, playlist tracks).
 	// Mirrors what Android's MediaLibrary and Windows' AMPLibraryAgent provide:
@@ -858,6 +890,7 @@ func (s *APIServer) Start() error {
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
 		TLSConfig:         tlsCfg,
+		ErrorLog:          log.New(handshakeNoiseFilter{}, "", log.LstdFlags),
 	}
 	slog.Info("Apple Music API (TLS) ready", "addr", fmt.Sprintf("https://127.0.0.1:%d", s.port))
 	go s.tlsSrv.ServeTLS(l, "", "") //nolint:errcheck
@@ -937,7 +970,11 @@ func isLoopbackHost(hostport string) bool {
 }
 
 // isAllowedOrigin matches origins exactly by scheme and hostname — a prefix
-// test would also accept e.g. http://localhost.attacker.example.
+// test would also accept e.g. http://localhost.attacker.example. Apart from
+// music.apple.com, only loopback origins on the engine's own port are accepted
+// (MUSICKIT_ALLOW_LOCAL_ORIGINS=1 widens that to any loopback port for local web
+// tooling): otherwise any other web app on this machine could drive the
+// unauthenticated API.
 func isAllowedOrigin(origin string) bool {
 	if origin == "https://music.apple.com" {
 		return true
@@ -946,7 +983,24 @@ func isAllowedOrigin(origin string) bool {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" {
 		return false
 	}
-	return isLoopbackHost(u.Host)
+	if !isLoopbackHost(u.Host) {
+		return false
+	}
+	if os.Getenv("MUSICKIT_ALLOW_LOCAL_ORIGINS") == "1" {
+		return true
+	}
+	return u.Port() == enginePort()
+}
+
+// listenPort is the port the engine serves on, published by NewAPIServer so the
+// origin check can recognise the engine's own loopback origin.
+var listenPort atomic.Int32
+
+func enginePort() string {
+	if p := listenPort.Load(); p != 0 {
+		return strconv.Itoa(int(p))
+	}
+	return "20025"
 }
 
 // setCORSHeaders writes all CORS response headers onto w based on the request origin.
@@ -1036,13 +1090,25 @@ func (s *APIServer) musicUserToken() string {
 	return s.mediaUserToken()
 }
 
+// webSessionTokens returns only what the web player supplied (never the credential files, which the
+// session manager consults itself): the token source for the DRM session.
+func (s *APIServer) webSessionTokens() (mut, storefront string) {
+	s.mkTokenMu.RLock()
+	defer s.mkTokenMu.RUnlock()
+	return s.mkMusicToken, ""
+}
+
 func (s *APIServer) setMusicUserToken(tok string) {
 	if tok == "" {
 		return
 	}
 	s.mkTokenMu.Lock()
+	changed := s.mkMusicToken != tok
 	s.mkMusicToken = tok
 	s.mkTokenMu.Unlock()
+	if changed && s.dm != nil {
+		s.dm.NoteWebSession() // reports the session and starts the DRM backend if it is not running
+	}
 }
 
 func (s *APIServer) lang(r *http.Request) string {
@@ -1082,6 +1148,27 @@ func exportRoots() []string {
 	return []string{"/nonexistent"} // no home to anchor to: refuse rather than allow everything
 }
 
+// pickedExportRoots returns the folders the user chose in the app's native folder dialog.
+// The Electron main process writes them, one per line, to the file named by
+// MUSICKIT_EXPORT_PICKED; the page cannot write it, so it cannot widen the roots itself.
+func pickedExportRoots() []string {
+	f := os.Getenv("MUSICKIT_EXPORT_PICKED")
+	if f == "" {
+		return nil
+	}
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if l = strings.TrimSpace(l); l != "" && filepath.IsAbs(l) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // installReleaseHook frees a session's server-side resources however the session ends.
 // DELETE /playback/{id} does this itself; a session that simply expires, or whose client
 // vanished, would otherwise leave its producers running and its cache file pinned.
@@ -1090,4 +1177,16 @@ func (s *APIServer) installReleaseHook() {
 		s.stopMVGrowing(id)
 		s.stopVsegSession(id)
 	})
+}
+
+// handshakeNoiseFilter drops "TLS handshake error ... EOF" lines: local clients
+// (reachability probes, aborted media requests) close mid-handshake all the
+// time. Every other server error is passed through to the normal log.
+type handshakeNoiseFilter struct{}
+
+func (handshakeNoiseFilter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) && bytes.HasSuffix(bytes.TrimSpace(p), []byte("EOF")) {
+		return len(p), nil
+	}
+	return log.Writer().Write(p)
 }

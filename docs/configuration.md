@@ -34,6 +34,9 @@ The remaining keys (folder templates, tagging, conversion, lyrics format) apply 
 | `MUSICKIT_TLS_PINS` | Comma-separated base64 SPKI SHA-256 pins for the DRM client's HTTPS connections; when set, a handshake succeeds only if some certificate in the served chain matches |
 | `MUSICKIT_WIDEVINE_DIR` | Directory holding `device_private_key` and `device_client_id_blob` (default `~/.config/musickit-sdk-linux/widevine`); required for AAC/MV key requests |
 | `MUSICKIT_MV_DIRECT_SEEK=0` | Disable fragment-level MV seeks and always use the FFmpeg seek producer (on by default for H.264 streams) |
+| `MUSICKIT_EXPORT_PICKED` | File listing, one absolute path per line, extra folders exports may write into (for example folders chosen in a native folder dialog). It must be writable only by the host application: the page cannot widen the roots through it |
+| `MUSICKIT_ALLOW_LOCAL_ORIGINS=1` | Accept browser requests from any loopback origin, not only the engine's own port (local web tooling) |
+| `MUSICKIT_ENGINE_DEBUG` | Per-track engine tracing (any non-empty value) |
 | `MUSICKIT_EXPORT_ROOTS` | Colon-separated directories exports may write into (default: the user's home). A request's `outputDir` outside them is refused |
 | `MUSICKIT_API_TOKEN` | When set, every API request must carry it (`Authorization: Bearer`, `X-Api-Token` or `?access_token=`) |
 | `MUSICKIT_ALLOW_OTHER_USERS=1` | Turn off the per-user connection check (any local account may then use the API) |

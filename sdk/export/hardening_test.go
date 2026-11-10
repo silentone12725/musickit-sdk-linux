@@ -95,3 +95,34 @@ func TestArtworkDownloadIsBoundedAndCancellable(t *testing.T) {
 		t.Fatal("cancelling the job did not stop the artwork download")
 	}
 }
+
+func TestNormalizeOutputDirIsAlwaysAbsolute(t *testing.T) {
+	for _, in := range []string{"-y", "-i/evil", "relative/dir", "../up", ".", "/already/abs", "/a/../b"} {
+		got, err := normalizeOutputDir(in)
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if !filepath.IsAbs(got) {
+			t.Errorf("normalizeOutputDir(%q) = %q, want an absolute path", in, got)
+		}
+	}
+	if _, err := normalizeOutputDir("a\x00b"); err == nil {
+		t.Error("a path containing a NUL byte must be refused")
+	}
+}
+
+func TestMoreRootsExtendConfinement(t *testing.T) {
+	root, extra, other := t.TempDir(), t.TempDir(), t.TempDir()
+	var picked []string
+	m := NewManager(nil, nil, Options{OutputRoots: []string{root}, MoreRoots: func() []string { return picked }})
+	if err := m.checkOutputDir(extra); err == nil {
+		t.Fatal("folder outside the roots accepted before it was picked")
+	}
+	picked = []string{extra}
+	if err := m.checkOutputDir(extra); err != nil {
+		t.Fatalf("picked folder rejected: %v", err)
+	}
+	if err := m.checkOutputDir(other); err == nil {
+		t.Fatal("unrelated folder accepted")
+	}
+}

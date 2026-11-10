@@ -1,6 +1,7 @@
 // Serves this directory on http://127.0.0.1:8080 (or the port given as the first
 // argument). The engine accepts browser requests only from https://music.apple.com or a
-// loopback origin, so the page must be served from 127.0.0.1 / localhost.
+// loopback origin on its own port, so start the engine with MUSICKIT_ALLOW_LOCAL_ORIGINS=1
+// and serve the page from 127.0.0.1 / localhost.
 //   node serve.mjs [port]
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';

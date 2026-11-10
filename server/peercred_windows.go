@@ -60,7 +60,7 @@ func currentUserSID() (*windows.SID, error) {
 }
 
 // peerSIDMatch returns 1 when the process on the other end of the loopback connection runs as
-// the same user as the engine, 0 when it runs as someone else.
+// the same user as the engine, 0 when it runs as someone else (or in another logon session).
 func peerSIDMatch(c net.Conn, self *windows.SID) (uint32, error) {
 	client, ok1 := c.RemoteAddr().(*net.TCPAddr)
 	server, ok2 := c.LocalAddr().(*net.TCPAddr)
@@ -71,24 +71,49 @@ func peerSIDMatch(c net.Conn, self *windows.SID) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
+	// A token we can read gives the exact user. Chromium's sandboxed helper processes (the
+	// network service and renderers) run with restricted tokens that deny TOKEN_QUERY even to
+	// the same user, so when the token is unreadable fall back to the logon session: another
+	// user's processes live in a different session.
+	if sid, ok := processUserSID(pid); ok {
+		if windows.EqualSid(sid, self) {
+			return 1, nil
+		}
+		slog.Warn("peer runs as a different user", "pid", pid, "peerSID", sid.String(), "ourSID", self.String())
+		return 0, nil
+	}
+	var peerSession, ourSession uint32
+	if err := windows.ProcessIdToSessionId(pid, &peerSession); err != nil {
+		slog.Warn("peer token unreadable and its session unknown", "pid", pid, "err", err)
+		return 0, nil
+	}
+	if err := windows.ProcessIdToSessionId(uint32(windows.GetCurrentProcessId()), &ourSession); err != nil {
+		return 0, err
+	}
+	if peerSession == ourSession {
+		return 1, nil
+	}
+	slog.Warn("peer token unreadable and it runs in another session", "pid", pid, "peerSession", peerSession, "ourSession", ourSession)
+	return 0, nil
+}
+
+// processUserSID returns the user SID of a process, or ok=false when its token cannot be read.
+func processUserSID(pid uint32) (*windows.SID, bool) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return 0, nil // cannot open it: it belongs to someone we may not inspect
+		return nil, false
 	}
 	defer windows.CloseHandle(h)
 	var tok windows.Token
 	if err := windows.OpenProcessToken(h, windows.TOKEN_QUERY, &tok); err != nil {
-		return 0, nil
+		return nil, false
 	}
 	defer tok.Close()
 	u, err := tok.GetTokenUser()
 	if err != nil {
-		return 0, err
+		return nil, false
 	}
-	if windows.EqualSid(u.User.Sid, self) {
-		return 1, nil
-	}
-	return 0, nil
+	return u.User.Sid, true
 }
 
 // ownerPid finds the pid owning the client end (local = client, remote = server) of a connection.

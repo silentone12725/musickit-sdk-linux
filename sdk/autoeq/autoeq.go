@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/appdir"
 	"log"
 	"math"
 	"net/http"
@@ -62,22 +63,13 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 // configDir returns ~/.config/musickit-sdk-linux, creating it if needed.
 func configDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	d := filepath.Join(home, ".config", "musickit-sdk-linux")
+	d := appdir.Config()
 	return d, os.MkdirAll(d, 0o755)
 }
 
 // cacheDir returns ~/.cache/musickit-sdk-linux/autoeq, creating it if needed.
 func cacheDir() (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base, _ = os.UserHomeDir()
-		base = filepath.Join(base, ".cache")
-	}
-	d := filepath.Join(base, "musickit-sdk-linux", "autoeq")
+	d := filepath.Join(appdir.Cache(), "autoeq")
 	return d, os.MkdirAll(d, 0o755)
 }
 

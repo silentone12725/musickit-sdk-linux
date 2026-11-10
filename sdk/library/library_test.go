@@ -1,9 +1,16 @@
 package library
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/go-resty/resty/v2"
 )
 
 func song(id, cid, album string, disc, track int) amItem {
@@ -24,6 +31,7 @@ func song(id, cid, album string, disc, track int) amItem {
 func TestPersistenceRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
+	t.Cleanup(s.bg.Wait) // Ingest saves in the background; it must finish before the temp dir is removed
 	var album amItem
 	album.ID = "l.album1"
 	album.Attributes.Name = "Album"
@@ -44,7 +52,8 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		PlaylistTracks: map[string][]amItem{"p.1": {song("i.2", "102", "", 0, 0)}},
 		Revision:       "rev-42",
 	})
-	s.save() // Ingest saves asynchronously; save synchronously for the test
+	s.save()    // Ingest saves asynchronously; save synchronously for the test
+	s.bg.Wait() // the background save from Ingest must finish too, or it may still hold the temp file below
 
 	r := New(dir)
 	got := r.SongsByAlbum("l.album1")
@@ -94,8 +103,8 @@ func TestLoadRejectsTamperedCache(t *testing.T) {
 // A key file that is unreadable for any reason other than "absent" must not be replaced:
 // minting a new key would overwrite the real one and orphan the encrypted cache.
 func TestKeyIsNotRegeneratedOnReadFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file permissions")
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("file permissions are not enforced here (root, or Windows)")
 	}
 	dir := t.TempDir()
 	s := New(dir)
@@ -104,7 +113,7 @@ func TestKeyIsNotRegeneratedOnReadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyPath := filepath.Join(dir, "library.key")
-	if fi, err := os.Stat(keyPath); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(keyPath); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("key file: %v, mode %v", err, fi.Mode().Perm())
 	}
 
@@ -175,5 +184,39 @@ func TestLoadIgnoresNewerCacheFormat(t *testing.T) {
 	s2 := New(dir)
 	if songs, _, _, _ := s2.Stats(); songs != 0 {
 		t.Fatalf("loaded %d songs from a newer format", songs)
+	}
+}
+
+func TestFetchPlaylistTracks_RepeatedCursorTerminates(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"i.1"}],"next":"/v1/me/library/playlists/p.1/tracks?offset=100"}`)
+	}))
+	defer srv.Close()
+	c := resty.New().SetBaseURL(srv.URL)
+	_, err := fetchPlaylistTracks(context.Background(), c, "p.1")
+	if err == nil {
+		t.Fatal("expected an error for a cursor that never advances")
+	}
+	if calls > 5 {
+		t.Fatalf("made %d requests; a repeated cursor must stop immediately", calls)
+	}
+}
+
+func TestFetchPlaylistTracks_FollowsPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("offset") == "" {
+			fmt.Fprint(w, `{"data":[{"id":"i.1"}],"next":"/v1/me/library/playlists/p.1/tracks?offset=100"}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"id":"i.2"}]}`)
+	}))
+	defer srv.Close()
+	got, err := fetchPlaylistTracks(context.Background(), resty.New().SetBaseURL(srv.URL), "p.1")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %v err=%v, want 2 tracks", got, err)
 	}
 }

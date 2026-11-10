@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/silentone12725/musickit-sdk-linux/sdk/drm"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/export"
 )
 
 func (s *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -52,19 +51,12 @@ func (s *APIServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleTools reports whether ffmpeg can really be used: it is resolved like exports resolve it (the optional
+// ?ffmpegPath= is the user's custom path, validated the same way) and run, not just looked up.
 func (s *APIServer) handleTools(w http.ResponseWriter, r *http.Request) {
-	ffPath, ffErr := exec.LookPath("ffmpeg")
-	ffInfo := map[string]any{"available": ffErr == nil, "path": ffPath}
-	if ffErr == nil {
-		if out, err := exec.Command(ffPath, "-version").Output(); err == nil {
-			// First line: "ffmpeg version 6.1.1 Copyright ..."
-			line := strings.SplitN(string(out), "\n", 2)[0]
-			if parts := strings.Fields(line); len(parts) >= 3 && parts[0] == "ffmpeg" && parts[1] == "version" {
-				ffInfo["version"] = parts[2]
-			}
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ffmpeg": ffInfo})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ffmpeg": export.ProbeFFmpeg(r.Context(), r.URL.Query().Get("ffmpegPath")),
+	})
 }
 
 // handleRuntimeStats reports scalar Go runtime metrics for the benchmark
@@ -94,7 +86,7 @@ func (s *APIServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	// DRMManager.Status() gives a complete snapshot including whether FairPlay
 	// is initialised and what content types are available.
 	var snap drm.DRMSnapshot
-	if s.dm != nil { // nil when built without widevine_backend
+	if s.dm != nil { // nil when built without adamplay_backend
 		snap = s.dm.Status()
 	}
 	cap := snap.Capabilities
@@ -112,6 +104,8 @@ func (s *APIServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"fairplay": snap.State.FairPlay.String(),
 			"session":  snap.State.Session.String(),
 			"cbcs":     cap.CBCS,
+			// False when this build has no DRM layer at all: lossless can never become ready.
+			"available": s.dm != nil,
 		},
 	})
 }
@@ -231,6 +225,9 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.shutdownCtx.Done():
+			// Server shutdown: end the stream so http.Server.Shutdown doesn't wait on it.
 			return
 		case <-heartbeat.C:
 			writeEv(s.events.nextID(), "ping", map[string]int64{"ts": time.Now().UnixMilli()}, epochInfo.Generation, false, "")

@@ -18,7 +18,10 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"log"
+	"runtime/debug"
 )
 
 // ── Stream type metadata ───────────────────────────────────────────────────────
@@ -158,6 +161,12 @@ type Stream struct {
 	Stages []Stage
 	Kind   StreamKind
 	Codec  Codec
+	// DurationMs is the length the stream's own playlist declares (the sum of its segment durations), or 0 when
+	// unknown. It can differ from the catalog length, and it is what the player will actually reach the end of.
+	DurationMs int
+	// CodecString is the MSE codec string of the variant actually opened, when it can differ from the one the track was
+	// advertised with (a video that fell back to a lower variant). Empty means the track's own string applies.
+	CodecString string
 }
 
 // ── Seek context ─────────────────────────────────────────────────────────────
@@ -209,7 +218,7 @@ func Run(ctx context.Context, stream *Stream, dst io.Writer) error {
 // that become the next stage's reader.
 func runChain(ctx context.Context, src Source, stages []Stage, dst io.Writer) error {
 	if len(stages) == 0 {
-		return src.Stream(ctx, dst)
+		return streamSafely(ctx, src, dst)
 	}
 
 	// Feed the first N-1 stages through a pipe into the last stage.
@@ -217,7 +226,7 @@ func runChain(ctx context.Context, src Source, stages []Stage, dst io.Writer) er
 	go func() {
 		var err error
 		if len(stages) == 1 {
-			err = src.Stream(ctx, pw)
+			err = streamSafely(ctx, src, pw)
 		} else {
 			err = runChain(ctx, src, stages[:len(stages)-1], pw)
 		}
@@ -227,9 +236,29 @@ func runChain(ctx context.Context, src Source, stages []Stage, dst io.Writer) er
 			pw.Close()
 		}
 	}()
-	err := stages[len(stages)-1].Process(ctx, pr, dst)
+	err := processSafely(ctx, stages[len(stages)-1], pr, dst)
 	// If the stage returned before draining its input (error, or it simply
 	// stopped reading), the upstream goroutine would block forever on the pipe.
 	pr.CloseWithError(io.ErrClosedPipe)
 	return err
+}
+
+// Sources and stages parse network data (fMP4 from the CDN) with libraries that
+// panic on malformed input. A panic in a stream goroutine would kill the whole
+// engine, so it is turned into an error for that one stream.
+func streamSafely(ctx context.Context, src Source, w io.Writer) (err error) {
+	defer recoverInto(&err, "source")
+	return src.Stream(ctx, w)
+}
+
+func processSafely(ctx context.Context, st Stage, r io.Reader, w io.Writer) (err error) {
+	defer recoverInto(&err, "stage")
+	return st.Process(ctx, r, w)
+}
+
+func recoverInto(err *error, what string) {
+	if r := recover(); r != nil {
+		log.Printf("[pipeline] %s panicked: %v\n%s", what, r, debug.Stack())
+		*err = fmt.Errorf("pipeline %s panicked: %v", what, r)
+	}
 }

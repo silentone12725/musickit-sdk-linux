@@ -12,6 +12,7 @@ import (
 
 	cdm "github.com/silentone12725/musickit-sdk-linux/sdk/aacstream/cdm"
 	wvkey "github.com/silentone12725/musickit-sdk-linux/sdk/aacstream/wvkey"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/vlog"
 
 	"bytes"
 	"errors"
@@ -32,10 +33,36 @@ type PlaybackLicense struct {
 	Status     int    `json:"status"`
 }
 
+// KeyAndIV holds both the decryption key and initialization vector
+type KeyAndIV struct {
+	Key []byte
+	IV  []byte
+}
+
 func getPSSH(contentId string, kidBase64 string) (string, error) {
-	kidBytes, err := base64.StdEncoding.DecodeString(kidBase64)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode base64 KID: %v", err)
+	var kidBytes []byte
+
+	// For CBCS, the playlist has a placeholder KID (e.g., "AAAAAAAAAAAAAAAAAAAAAA" = 18 chars)
+	// This is just a cache key - the real key comes from the Widevine response
+	// Use zero KID for CBCS placeholder
+	if kidBase64 == "" || kidBase64 == "AAAAAAAAAAAAAAAAAAAAAA" {
+		kidBytes = make([]byte, 16)
+		log.Printf("[aacstream] DEBUG: Using placeholder KID (zero bytes)")
+	} else {
+		var err error
+		kidBytes, err = decodeKIDBase64(kidBase64)
+		if err != nil {
+			return "", fmt.Errorf("failed to decode base64 KID: %w", err)
+		}
+	}
+
+	if len(kidBytes) > 16 {
+		// Apple MV playlists encode a 56-byte (or other extended) value in the KID
+		// field; the actual FairPlay KID UUID occupies the first 16 bytes.
+		kidBytes = kidBytes[:16]
+	}
+	if len(kidBytes) != 16 {
+		return "", fmt.Errorf("invalid KID length %d, want 16 bytes", len(kidBytes))
 	}
 	contentIdEncoded := base64.StdEncoding.EncodeToString([]byte(contentId))
 	algo := cdm.WidevineCencHeader_AESCTR
@@ -50,10 +77,27 @@ func getPSSH(contentId string, kidBase64 string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal WidevineCencHeader: %v", err)
 	}
-	//最前面添加32字节
+	// 最前面添加 32 字节
 	widevineCenc = append([]byte("0123456789abcdef0123456789abcdef"), widevineCenc...)
 	pssh := base64.StdEncoding.EncodeToString(widevineCenc)
 	return pssh, nil
+}
+
+// decodeKIDBase64 accepts the padded and unpadded forms emitted by Apple HLS.
+// KIDs are opaque bytes, so URL-safe alphabets are accepted as well.
+func decodeKIDBase64(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		if decoded, err := encoding.DecodeString(value); err == nil {
+			return decoded, nil
+		}
+	}
+	return nil, fmt.Errorf("invalid base64 encoding")
 }
 
 // licenseParams carries the per-track values the Widevine license request
@@ -92,24 +136,35 @@ func BeforeRequest(cl *resty.Client, ctx context.Context, url string, body []byt
 	return resp, err
 }
 
-func AfterRequest(response *resty.Response) ([]byte, error) {
+// ErrLicenceRefused is returned when Apple's licence server answered with an error: it refused to grant the key (for
+// example a quality tier this client may not play), as opposed to a request that failed in transit.
+var ErrLicenceRefused = errors.New("error in license response")
+
+func AfterRequest(response *resty.Response) ([]byte, []byte, error) {
 	var responseData PlaybackLicense
 
 	err := json.Unmarshal(response.Body(), &responseData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse response JSON: %v", err)
+		return nil, nil, fmt.Errorf("failed to parse response JSON: %v", err)
 	}
 
 	if responseData.ErrorCode != 0 || responseData.Status != 0 {
-		return nil, fmt.Errorf("error in license response, code: %d, status: %d", responseData.ErrorCode, responseData.Status)
+		// An error response carries no licence, so its body is safe to show and often says why it was refused.
+		body := string(response.Body())
+		if len(body) > 400 {
+			body = body[:400] + "…"
+		}
+		log.Printf("[aacstream] licence refused (HTTP %d): %s", response.StatusCode(), body)
+		return nil, nil, fmt.Errorf("%w, code: %d, status: %d", ErrLicenceRefused, responseData.ErrorCode, responseData.Status)
 	}
 
 	license, err := base64.StdEncoding.DecodeString(responseData.License)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode license: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode license: %v", err)
 	}
 
-	return license, nil
+	// Apple Music's CBCS key contexts use a fixed zero IV.
+	return license, make([]byte, 16), nil
 }
 
 // retryBackoff sleeps the exponential backoff for attempt and returns whether
@@ -173,7 +228,7 @@ func WarmLicensePool(ctx context.Context) {
 	defer cancel()
 	cl := resty.New().SetTransport(licenseTransport)
 	if resp, err := cl.R().SetContext(ctx).Get("https://play.itunes.apple.com/"); err == nil {
-		log.Printf("[drm] license pool warmed status=%d", resp.StatusCode())
+		vlog.Printf("[drm] license pool warmed status=%d", resp.StatusCode())
 	}
 }
 
@@ -206,18 +261,18 @@ func InvalidateKey(kidBase64, uriPrefix string) { keyCache.Delete(cacheKeyFor(ki
 // (eliminating the CDM round-trip on track resume).  When forceRefresh is true,
 // the cache is bypassed and a fresh licence is acquired — use this after a
 // decryption failure to recover from a stale cached key.
-func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoken string, forceRefresh bool) ([]byte, error) {
+func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoken string, forceRefresh bool) (KeyAndIV, error) {
 	ck := cacheKeyFor(kidBase64, uriPrefix)
 	if !forceRefresh {
 		if v, ok := keyCache.Load(ck); ok {
-			return v.([]byte), nil
+			return v.(KeyAndIV), nil
 		}
 	}
 	ctx = withLicenseParams(ctx, licenseParams{pssh: kidBase64, adamID: adamID, uriPrefix: uriPrefix})
 
 	pssh, err := getPSSH("", kidBase64)
 	if err != nil {
-		return nil, fmt.Errorf("pssh: %w", err)
+		return KeyAndIV{}, fmt.Errorf("pssh: %w", err)
 	}
 
 	headers := map[string]string{
@@ -233,13 +288,14 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 	}
 	k.CdmInit()
 
-	_, keyBytes, err := k.GetKey(ctx,
+	_, keyBytes, ivBytes, err := k.GetKey(ctx,
 		"https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense",
 		pssh, nil)
+	result := KeyAndIV{Key: keyBytes, IV: ivBytes}
 	if err == nil && len(keyBytes) > 0 {
-		keyCache.Store(ck, keyBytes)
+		keyCache.Store(ck, result)
 	}
-	return keyBytes, err
+	return result, err
 }
 
 // stableCacheKey strips rotating query parameters (Apple CDN accessKey rotates
@@ -708,95 +764,6 @@ func kickMVSegmentBackground(diskKey, fetchURL, rangeHdr string) {
 			log.Printf("[mv-seg] bg-dl cached key=%s len=%d", shortKey(diskKey), len(data))
 		}
 	}()
-}
-
-// DownloadMVSegmentsParallel is like DownloadSegmentsParallel but uses the
-// separate MV video segment cache. Use for MV video tracks.
-func DownloadMVSegmentsParallel(ctx context.Context, urls []string, w io.Writer, concurrency int) error {
-	log.Printf("[dl] DownloadMVSegmentsParallel nURLs=%d concurrency=%d firstURL=%s",
-		len(urls), concurrency, func() string {
-			if len(urls) > 0 {
-				return urls[0]
-			}
-			return "(none)"
-		}())
-
-	type result struct {
-		data []byte
-		err  error
-	}
-
-	resultChs := make([]chan result, len(urls))
-	for i := range resultChs {
-		resultChs[i] = make(chan result, 1)
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	sem := make(chan struct{}, concurrency)
-
-	go func() {
-		for i, url := range urls {
-			i, url := i, url
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				for j := i; j < len(resultChs); j++ {
-					resultChs[j] <- result{err: ctx.Err()}
-				}
-				return
-			}
-			go func() {
-				defer func() { <-sem }()
-				t0 := time.Now()
-				data, err := fetchMVSegment(ctx, url)
-				if err == nil {
-					log.Printf("[dl] mv#%d arrived size=%dB elapsed=%.2fs", i, len(data), time.Since(t0).Seconds())
-				} else {
-					log.Printf("[dl] mv#%d error elapsed=%.2fs: %v", i, time.Since(t0).Seconds(), err)
-				}
-				resultChs[i] <- result{data: data, err: err}
-			}()
-		}
-	}()
-
-	for i, ch := range resultChs {
-		r := <-ch
-		if r.err != nil {
-			cancel()
-			return fmt.Errorf("segment %d: %w", i, r.err)
-		}
-		if _, err := w.Write(r.data); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// DownloadSegments streams each URL one at a time, writing each segment to w
-// immediately after it is fetched. Use for small segments (AAC audio) where
-// startup latency matters more than throughput.
-func DownloadSegments(ctx context.Context, urls []string, w io.Writer) error {
-	log.Printf("[dl] DownloadSegments nURLs=%d firstURL=%s", len(urls), func() string {
-		if len(urls) > 0 {
-			return urls[0]
-		}
-		return "(none)"
-	}())
-	for i, cacheKey := range urls {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		data, err := fetchSegment(ctx, cacheKey)
-		if err != nil {
-			return fmt.Errorf("segment %d: %w", i, err)
-		}
-		if _, err := w.Write(data); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // DownloadSegmentsParallel fetches up to concurrency segments simultaneously

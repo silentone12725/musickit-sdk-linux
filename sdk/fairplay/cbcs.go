@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/itouakirai/mp4ff/mp4"
@@ -17,10 +18,11 @@ import (
 	"github.com/silentone12725/musickit-sdk-linux/sdk/hls"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/pipeline"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/tracer"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/vlog"
 )
 
 // DialerFromAddr returns a CBCSDialer that dials the given TCP address directly.
-// Intended for tests and legacy callers that hold a raw address string.
+// Tests use it to drive the streaming loop against a fake decryption server.
 func DialerFromAddr(addr string) CBCSDialer { return addrDialer(addr) }
 
 type addrDialer string
@@ -193,8 +195,8 @@ func (dc *drmConn) close() {
 // FairPlay decryption connection. In production DRMManager implements this,
 // delegating to WidevineBackend.DialCBCS which returns an in-process net.Pipe().
 //
-// Defined here (not in sdk/drm) so that sdk/fairplay does not import
-// sdk/drm, preserving the one-way dependency: drm → fairplay is forbidden.
+// Defined here (not in engine/drm) so that engine/fairplay does not import
+// engine/drm, preserving the one-way dependency: drm → fairplay is forbidden.
 type CBCSDialer interface {
 	// DialCBCS opens one decryption session. The caller owns the connection
 	// and speaks the runv2 FairPlay wire protocol (sendString + DecryptFragment).
@@ -206,37 +208,38 @@ type CBCSDialer interface {
 // in-process pipes rather than sockets to another process.
 type inProcessDialer interface{ InProcess() bool }
 
-// CBCSSource returns a pipeline.Source that downloads and decrypts a FairPlay
-// CBCS-encrypted Apple Music track.
-//
-// The entire encrypted fMP4 is downloaded as a single file (Apple Music CBCS
-// playlists are byterange playlists pointing at one file).  Each fragment is
-// sent through the connection opened by dialer for in-place decryption.
-//
-// Parameters:
-//   - adamID:     Apple Music track ID — sent to the socket for key lookup
-//   - dialer:     opens a FairPlay decryption connection (DRMManager in production)
-//   - fileURL:    URL of the single encrypted fMP4 file
-//   - keyURIs:    one per playlist segment; sent to the socket before each fragment
-//   - durationMs: total track duration in milliseconds (from catalog metadata);
-//     used to patch mvhd.Duration so players (mpv, VLC) know the
-//     correct playback length.  Pass 0 to leave the moov unchanged.
+// CBCSSource returns a pipeline.Source that downloads the single encrypted
+// fMP4 at fileURL and streams it out decrypted, one fragment at a time, through
+// connections opened by dialer. Production uses CBCSSeekableSource; tests use
+// this to exercise the same streaming loop. durationMs patches mvhd.Duration
+// (0 leaves the moov unchanged).
 func CBCSSource(adamID string, dialer CBCSDialer, fileURL string, keyURIs []string, durationMs int) pipeline.Source {
 	return &cbcsSource{
 		adamID:     adamID,
 		dialer:     dialer,
 		fileURL:    fileURL,
-		keyURIs:    keyURIs,
+		keyURIs:    upstreamKeyURIs(keyURIs),
 		durationMs: durationMs,
 	}
 }
 
+// upstreamKeyURIs keeps only the key tags on segments 0 (prefetch) and 1
+// (track content key), exactly like zhaarey/apple-music-downloader; later
+// EXT-X-KEY tags are ignored there and every remaining fragment decrypts with
+// the segment-1 key. Returns a copy so the shared playlist is never mutated.
+func upstreamKeyURIs(keyURIs []string) []string {
+	out := make([]string, len(keyURIs))
+	copy(out, keyURIs[:min(2, len(keyURIs))])
+	return out
+}
+
 type cbcsSource struct {
-	adamID     string
-	dialer     CBCSDialer
-	fileURL    string
-	keyURIs    []string
-	durationMs int // 0 = leave moov duration unchanged
+	adamID       string
+	dialer       CBCSDialer
+	fileURL      string
+	keyURIs      []string
+	durationMs   int    // 0 = leave moov duration unchanged
+	lastArmedKey string // key URI most recently sent via sendKeyHandshake
 }
 
 // Stream implements pipeline.Source.  It wraps streamAttempt in a retry loop
@@ -261,7 +264,7 @@ type cbcsSource struct {
 // cancellation interrupts the wait.  This is a deliberate adaptation — not
 // proven to be equivalent in all scenarios.
 func (s *cbcsSource) Stream(ctx context.Context, w io.Writer) error {
-	log.Printf("[cbcs] Stream START: adamID=%s fileURL=%s", s.adamID, s.fileURL)
+	vlog.Printf("[cbcs] Stream START: adamID=%s fileURL=%s", s.adamID, s.fileURL)
 	const maxRetries = 3
 	// Track whether any bytes reached w. Retrying after a partial write
 	// would corrupt the output stream (D7 in behavioral-parity-audit.md).
@@ -269,10 +272,10 @@ func (s *cbcsSource) Stream(ctx context.Context, w io.Writer) error {
 	var err error
 	tr := tracer.FromContext(ctx)
 	for attempt := range maxRetries {
-		log.Printf("[cbcs] Stream attempt %d", attempt+1)
+		vlog.Printf("[cbcs] Stream attempt %d", attempt+1)
 		err = s.streamAttempt(ctx, tw)
 		if err == nil {
-			log.Printf("[cbcs] Stream SUCCESS")
+			vlog.Printf("[cbcs] Stream SUCCESS")
 			return nil
 		}
 		if tw.wrote > 0 {
@@ -328,16 +331,16 @@ type cbcsSeekableSource struct {
 }
 
 func (s *cbcsSeekableSource) Stream(ctx context.Context, w io.Writer) error {
-	log.Printf("[cbcs] SeekableSource.Stream START: adamID=%s fileURL=%s", s.adamID, s.media.FileURL)
+	vlog.Printf("[cbcs] SeekableSource.Stream START: adamID=%s fileURL=%s", s.adamID, s.media.FileURL)
 	src := &cbcsSource{
 		adamID:     s.adamID,
 		dialer:     s.dialer,
 		fileURL:    s.media.FileURL,
-		keyURIs:    s.media.KeyURIs,
+		keyURIs:    upstreamKeyURIs(s.media.KeyURIs),
 		durationMs: s.durationMs,
 	}
 	err := src.Stream(ctx, w)
-	log.Printf("[cbcs] SeekableSource.Stream END: adamID=%s err=%v", s.adamID, err)
+	vlog.Printf("[cbcs] SeekableSource.Stream END: adamID=%s err=%v", s.adamID, err)
 	return err
 }
 
@@ -362,21 +365,15 @@ func (s *cbcsSeekableSource) SourceFrom(startSec float64) (pipeline.Source, floa
 		startFrag = len(durs) - 1
 		actualStart = acc - durs[startFrag]
 	}
-	// Find the effective key URI at startFrag (last non-empty at or before startFrag).
-	startKey := ""
-	for i := 0; i <= startFrag && i < len(s.media.KeyURIs); i++ {
-		if s.media.KeyURIs[i] != "" {
-			startKey = s.media.KeyURIs[i]
-		}
-	}
+	keys := upstreamKeyURIs(s.media.KeyURIs)
 	return &cbcsSkipSource{
 		adamID:     s.adamID,
 		dialer:     s.dialer,
 		fileURL:    s.media.FileURL,
-		keyURIs:    s.media.KeyURIs,
+		keyURIs:    keys,
 		durationMs: s.durationMs,
 		startFrag:  startFrag,
-		startKey:   startKey,
+		startKey:   effectiveKeyURI(keys, startFrag),
 	}, actualStart
 }
 
@@ -571,11 +568,16 @@ func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter) {
 	if i >= len(s.keyURIs) || s.keyURIs[i] == "" {
 		return
 	}
-	if i != 0 {
+	keyURI := s.keyURIs[i]
+	if keyURI == s.lastArmedKey {
+		return
+	}
+	if s.lastArmedKey != "" {
 		alacstream.SwitchKeys(rw)
 	}
 	alacstream.SendString(rw, keyAdamID(s.adamID, s.keyURIs[i]))
-	alacstream.SendString(rw, s.keyURIs[i])
+	alacstream.SendString(rw, keyURI)
+	s.lastArmedKey = keyURI
 }
 
 // effectiveKeyURI returns the key in force at fragment i: the last non-empty
@@ -587,6 +589,56 @@ func effectiveKeyURI(keyURIs []string, i int) string {
 		}
 	}
 	return ""
+}
+
+// isSentinelKeyURI reports whether uri is the shared prefetch key. It is a
+// real key (it encrypts segment 0) but is opened under adamID "0" and is
+// pre-warmed once by the DRM backend, so per-track warming skips it.
+func isSentinelKeyURI(uri string) bool {
+	return strings.EqualFold(uri, cbcsPrefetchKey)
+}
+
+// FirstAudioKeyURI returns the track's own content key (the first key that is
+// not the shared prefetch key), or "" if there is none. Use it to pre-warm the
+// key context before the CBCS pipeline needs the key.
+func FirstAudioKeyURI(keyURIs []string) string {
+	for _, k := range upstreamKeyURIs(keyURIs) {
+		if k != "" && !isSentinelKeyURI(k) {
+			return k
+		}
+	}
+	return ""
+}
+
+// WarmCBCSKey opens a throwaway CBCS connection, sends the key handshake, and
+// closes the connection. This makes the DRM backend open the key context, which
+// fetches the FairPlay key from Apple's server and caches it. Subsequent CBCS
+// connections for the same key URI return the cached key in <10 ms instead of ~2 s.
+//
+// Call it in a goroutine as soon as adamID and keyURI are known — before the
+// CDN download starts. The key exchange then overlaps with the CDN download.
+func WarmCBCSKey(ctx context.Context, dialer CBCSDialer, adamID, keyURI string) {
+	if dialer == nil || adamID == "" || keyURI == "" || isSentinelKeyURI(keyURI) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	conn, err := dialer.DialCBCS(ctx)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	// Wire protocol: [1-byte len][adamID][1-byte len][keyURI]
+	// Writing this atomically ensures serveCBCS reads both fields before the
+	// connection closes, opening the key context even though we never send a fragment.
+	effID := keyAdamID(adamID, keyURI)
+	msg := make([]byte, 0, 3+len(effID)+len(keyURI))
+	msg = append(msg, byte(len(effID)))
+	msg = append(msg, effID...)
+	msg = append(msg, byte(len(keyURI)))
+	msg = append(msg, keyURI...)
+	conn.Write(msg) // nolint: errcheck — close handles cleanup
+	// conn.Close() fires: serveCBCS exits cleanly after the key context opens.
 }
 
 // keyAdamID is the adamID sent with a key URI: the shared prefetch key is
@@ -680,6 +732,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 	if err := alacstream.SanitizeInit(init); err != nil {
 		log.Printf("cbcs seek: warning: sanitize init: %v", err)
 	}
+
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
 		return fmt.Errorf("cbcs seek: encode init: %w", err)
@@ -712,7 +765,6 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 		// fresh connection has no key, so it gets a handshake for the key in
 		// force at i; otherwise only a key change at i is sent.
 		reconnected := dc.refreshIfNeeded()
-		accumulatedTfdt = patchAlacFragment(frag, accumulatedTfdt)
 		if reconnected {
 			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i)); err != nil {
 				return fmt.Errorf("cbcs seek: key after proactive reconnect %d: %w", i, err)
@@ -751,6 +803,9 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			}
 			log.Printf("cbcs seek: fragment %d decrypted after reconnect", i)
 		}
+		// Patch decode times only after decrypting: growing tfdt changes the moof
+		// size, and GetFullSamples locates sample data by the original offsets.
+		accumulatedTfdt = patchAlacFragment(frag, accumulatedTfdt)
 		dc.recordUse()
 
 		if err := frag.Encode(outBuf); err != nil {
@@ -817,6 +872,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	if err := alacstream.SanitizeInit(init); err != nil {
 		log.Printf("cbcs: warning: sanitize init: %v", err)
 	}
+
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
 		return fmt.Errorf("cbcs: encode init: %w", err)
@@ -840,11 +896,12 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		// fresh connection has no key, so it gets a handshake for the key in
 		// force at i; otherwise only a key change at i is sent.
 		reconnected := dc.refreshIfNeeded()
-		accumulatedTfdt = patchAlacFragmentSeq(frag, i, accumulatedTfdt)
 		if reconnected {
-			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i)); err != nil {
+			newKey := effectiveKeyURI(s.keyURIs, i)
+			if err := sendKeyHandshake(dc.rw, s.adamID, newKey); err != nil {
 				return fmt.Errorf("cbcs: key after proactive reconnect %d: %w", i, err)
 			}
+			s.lastArmedKey = newKey
 		} else {
 			s.sendFragKey(i, dc.rw)
 		}
@@ -875,15 +932,20 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 			dc.lastUsed = time.Now()
 
 			copy(frag.Mdat.Data, mdatBackup)
-			if err := sendKeyHandshake(dc.rw, s.adamID, effectiveKeyURI(s.keyURIs, i)); err != nil {
+			reconnKey := effectiveKeyURI(s.keyURIs, i)
+			if err := sendKeyHandshake(dc.rw, s.adamID, reconnKey); err != nil {
 				return fmt.Errorf("cbcs: key after reconnect %d: %w", i, err)
 			}
+			s.lastArmedKey = reconnKey
 
 			if err2 := alacstream.DecryptFragment(frag, tracks, dc.rw); err2 != nil {
 				return fmt.Errorf("cbcs: decrypt fragment %d after reconnect: %w", i, err2)
 			}
 			log.Printf("cbcs: fragment %d decrypted after reconnect", i)
 		}
+		// Patch decode times only after decrypting: growing tfdt changes the moof
+		// size, and GetFullSamples locates sample data by the original offsets.
+		accumulatedTfdt = patchAlacFragmentSeq(frag, i, accumulatedTfdt)
 		dc.recordUse()
 		if err := frag.Encode(outBuf); err != nil {
 			return fmt.Errorf("cbcs: encode fragment %d: %w", i, err)

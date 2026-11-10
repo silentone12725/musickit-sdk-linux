@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/appdir"
 	"io"
 	"log"
 	"math"
@@ -108,11 +109,7 @@ func GetHRTFSet() (*HRTFSet, error) {
 
 // customHRTFPath returns the user-provided HRTF WAV path if it exists.
 func customHRTFPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	p := filepath.Join(home, ".config", "musickit-sdk-linux", "hrtf.wav")
+	p := filepath.Join(appdir.Config(), "hrtf.wav")
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}
@@ -139,11 +136,7 @@ func wavSampleRate(path string) (int, error) {
 
 // hrtfCacheDir returns (creating if needed) ~/.cache/musickit-sdk-linux/hrtf/.
 func hrtfCacheDir() (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
-	}
-	dir := filepath.Join(base, "musickit-sdk-linux", "hrtf")
+	dir := filepath.Join(appdir.Cache(), "hrtf")
 	return dir, os.MkdirAll(dir, 0o755)
 }
 
@@ -287,6 +280,13 @@ func parseSOFABlob(raw []byte) (*sofaIRData, int, error) {
 	sr := int(int32(binary.LittleEndian.Uint32(raw[12:])))
 	off := 16
 
+	// Dimensions come from a SOFA file that may be user-supplied. Bound them before they
+	// size an allocation: a crafted header would otherwise overflow the length check and
+	// ask the runtime for gigabytes, which is a fatal out-of-memory, not a recoverable error.
+	const maxMeasurements, maxIRLen = 1 << 16, 1 << 16
+	if M <= 0 || N <= 0 || sr <= 0 || M > maxMeasurements || N > maxIRLen {
+		return nil, 0, fmt.Errorf("hrtf: implausible sofa dimensions (M=%d N=%d sr=%d)", M, N, sr)
+	}
 	want := M*2*N*8 + M*2*8
 	if len(raw) < off+want {
 		return nil, 0, fmt.Errorf("hrtf: blob too short (have %d, need %d)", len(raw), off+want)

@@ -7,8 +7,8 @@
 //     bytes; they enter fairplayDecryptor and never leave it.
 //
 //  2. HLSSource — builds a pipeline.Source that downloads HLS segments.
-//     This function lives here rather than in sdk/hls because
-//     sdk/aacstream is the authorised segment downloader and, outside main,
+//     This function lives here rather than in engine/hls because
+//     utils/aacstream is the authorised segment downloader and, outside main,
 //     this is the only engine package permitted to import it (see archtest).
 //
 // Trust boundary: key bytes enter the unexported fairplayDecryptor struct via
@@ -52,7 +52,11 @@ type LicenseProvider interface {
 	Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error)
 }
 
-// New returns the default LicenseProvider backed by sdk/aacstream.
+// ErrLicenceRefused is reported (wrapped) when the licence server refuses a key. Callers outside this package may not
+// import utils/aacstream, so it is re-exported here.
+var ErrLicenceRefused = aacstream.ErrLicenceRefused
+
+// New returns the default LicenseProvider backed by utils/aacstream.
 func New() LicenseProvider { return &fpLicenseProvider{} }
 
 type fpLicenseProvider struct{}
@@ -64,30 +68,26 @@ func (p *fpLicenseProvider) Open(ctx context.Context, req LicenseRequest) (pipel
 func (p *fpLicenseProvider) open(ctx context.Context, req LicenseRequest, forceRefresh bool) (pipeline.Decryptor, error) {
 	tr := tracer.FromContext(ctx)
 	tr.RecordLicenseStart()
-	keyBytes, err := aacstream.AcquireKey(ctx,
+	keyAndIV, err := aacstream.AcquireKey(ctx,
 		req.AssetID, req.KIDBase64, req.URIPrefix, req.Token, req.MediaUserToken, forceRefresh)
 	tr.RecordLicenseEnd()
 	if err != nil {
 		return nil, fmt.Errorf("fairplay licence: %w", err)
 	}
-	return &fairplayDecryptor{key: keyBytes, kid: req.KIDBase64, uriPrefix: req.URIPrefix}, nil
+	return &fairplayDecryptor{key: keyAndIV.Key, iv: keyAndIV.IV, kid: req.KIDBase64, uriPrefix: req.URIPrefix}, nil
 }
-
-// InvalidateKey evicts a cached content key identified by kidBase64 and
-// uriPrefix so the next Open call is forced to re-negotiate with the licence
-// server.  Use after a decrypt error to recover from a stale cached key.
-func InvalidateKey(kidBase64, uriPrefix string) { aacstream.InvalidateKey(kidBase64, uriPrefix) }
 
 // fairplayDecryptor is the ONLY type in the engine that holds key bytes.
 // It is unexported; callers receive it only through the pipeline.Decryptor interface.
 type fairplayDecryptor struct {
 	key       []byte
+	iv        []byte // Initialization vector from CKC
 	kid       string // kidBase64 — for cache invalidation on decrypt error
 	uriPrefix string
 }
 
 func (d *fairplayDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
-	err := aacstream.DecryptMP4Streaming(ctx, r, d.key, w)
+	err := aacstream.DecryptMP4Streaming(ctx, r, d.key, d.iv, w)
 	if d.kid != "" && shouldEvictKey(ctx, err) {
 		// Evict the stale cached key so the next session Open re-negotiates.
 		// Matches Android FootHillDecryptionKey.fetchKeyData(forceRefresh=true)
@@ -108,16 +108,6 @@ func shouldEvictKey(ctx context.Context, err error) bool {
 }
 
 // ── HLS segment source ────────────────────────────────────────────────────────
-
-// HLSSource returns a pipeline.Source that downloads and concatenates HLS
-// segments using the parallel downloader from sdk/aacstream.
-//
-// urls must be [initURL, seg0, seg1, …] as returned by hls.Media.AllURLs().
-//
-// HLSSource lives in this package rather than sdk/hls because
-// sdk/aacstream may only be imported here (and by main). The function is
-// otherwise a pure transport concern with no DRM knowledge.
-func HLSSource(urls []string) pipeline.Source { return &hlsSource{urls: urls} }
 
 type hlsSource struct {
 	urls []string

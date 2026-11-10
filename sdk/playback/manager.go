@@ -28,6 +28,7 @@ import (
 
 	"github.com/silentone12725/musickit-sdk-linux/sdk/media"
 	"github.com/silentone12725/musickit-sdk-linux/sdk/pipeline"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/vlog"
 )
 
 const sessionTTL = 4 * time.Hour
@@ -44,6 +45,7 @@ type OpenRequest struct {
 	MUT               string
 	Language          string
 	Lossless          bool
+	HiRes             bool
 	Atmos             bool
 	Video             bool
 	MVMaxHeight       int
@@ -138,7 +140,7 @@ const (
 // playback is in flight. Background streams never make this true.
 func (m *Manager) IsStreaming() bool { return m.fgActive.Load() > 0 }
 
-// ActiveStreams returns the number of in-flight streams of every class (for metrics).
+// ActiveStreams returns the number of in-flight streams of every class.
 func (m *Manager) ActiveStreams() int { return int(m.activeStreams.Load()) }
 
 // ForegroundStats returns a snapshot of Foreground stream instrumentation:
@@ -221,7 +223,7 @@ func NewWithProvider(p media.Provider) *Manager {
 // openKey builds a deduplication key from the fields that determine whether
 // two Open calls would produce the same session type.
 func openKey(req OpenRequest) string {
-	flags := fmt.Sprintf("%v:%v:%v:%d", req.Lossless, req.Atmos, req.Video, req.MVMaxHeight)
+	flags := fmt.Sprintf("%v:%v:%v:%v:%d", req.Lossless, req.HiRes, req.Atmos, req.Video, req.MVMaxHeight)
 	return req.AssetID + ":" + req.Storefront + ":" + flags
 }
 
@@ -231,7 +233,7 @@ func openKey(req OpenRequest) string {
 // Concurrent calls for the same (assetID, storefront, capabilities) key are
 // deduplicated: the second caller waits for the first to finish and receives
 // the same Session, preventing orphaned DRM sessions.
-func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
+func (m *Manager) Open(ctx context.Context, req OpenRequest) (sess *Session, err error) {
 	if req.Private {
 		return m.openDirect(ctx, req, "")
 	}
@@ -268,12 +270,20 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 		m.inflight[key] = fl
 		m.inflightMu.Unlock()
 
-		// We are the leader: open the session, then signal all waiters.
+		// We are the leader: open the session, then signal all waiters. The cleanup is
+		// deferred so a panic in the provider cannot leave the flight registered (every
+		// later Open of this asset would join it and never return) or waiters blocked.
+		defer func() {
+			if r := recover(); r != nil {
+				fl.sess, fl.err = nil, fmt.Errorf("open %s: panic: %v", req.AssetID, r)
+				sess, err = nil, fl.err // without this the caller would get (nil, nil)
+			}
+			close(fl.done)
+			m.inflightMu.Lock()
+			delete(m.inflight, key)
+			m.inflightMu.Unlock()
+		}()
 		fl.sess, fl.err = m.openDirect(ctx, req, key)
-		close(fl.done)
-		m.inflightMu.Lock()
-		delete(m.inflight, key)
-		m.inflightMu.Unlock()
 		return fl.sess, fl.err
 	}
 }
@@ -286,6 +296,7 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 		MUT:               req.MUT,
 		Language:          req.Language,
 		Lossless:          req.Lossless,
+		HiRes:             req.HiRes,
 		Atmos:             req.Atmos,
 		Video:             req.Video,
 		MVMaxHeight:       req.MVMaxHeight,
@@ -324,6 +335,18 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 	if err != nil {
 		return nil, err
 	}
+	// Report the length the streams really have when it differs from the catalog's, so the player's progress,
+	// fades and end-of-track handling match where the audio ends.
+	declared := 0
+	for _, st := range streams {
+		if st != nil && st.DurationMs > declared {
+			declared = st.DurationMs
+		}
+	}
+	if d := media.ReconcileDurationMs(sess.DurationMs, declared); d != sess.DurationMs {
+		log.Printf("[playback] %s: stream is %dms, catalog says %dms: reporting the stream's", req.AssetID, d, sess.DurationMs)
+		sess.DurationMs = d
+	}
 	for i, track := range ms.Tracks {
 		stream := streams[i]
 		pctx.streams[track.Kind] = stream
@@ -344,6 +367,9 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 		case pipeline.KindVideo:
 			sess.Capabilities.Video = true
 			sess.Capabilities.VideoCodec = track.CodecString
+			if stream.CodecString != "" {
+				sess.Capabilities.VideoCodec = stream.CodecString
+			}
 			sess.Streams.Video = "/api/v1/playback/" + sess.ID + "/video"
 		}
 	}
@@ -403,7 +429,7 @@ func openTracks(ctx context.Context, assetID string, tracks []media.Track) ([]*p
 // Stream pipes the decrypted media for sessionID/kind to dst.
 // dst can be http.ResponseWriter, *os.File, io.PipeWriter, or anything.
 func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.StreamKind, dst io.Writer) error {
-	log.Printf("[playback] Stream START: session=%s kind=%s", sessionID, kind)
+	vlog.Printf("[playback] Stream START: session=%s kind=%s", sessionID, kind)
 	sess, pctx, ok := m.lookup(sessionID)
 	if !ok {
 		log.Printf("[playback] Stream lookup FAILED: session=%s", sessionID)
@@ -414,7 +440,7 @@ func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.St
 		log.Printf("[playback] Stream no stream: session=%s kind=%s", sessionID, kind)
 		return fmt.Errorf("session %s has no %s stream", sessionID, kind)
 	}
-	log.Printf("[playback] Stream found stream: session=%s kind=%s source=%T", sessionID, kind, stream.Source)
+	vlog.Printf("[playback] Stream found stream: session=%s kind=%s source=%T", sessionID, kind, stream.Source)
 	dst, end := m.beginStream(ctx, sess, kind, dst)
 	defer end()
 	err := pipeline.Run(ctx, stream, dst)

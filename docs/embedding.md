@@ -7,7 +7,7 @@ There are two ways to build on the SDK. Pick per component; they mix freely.
 
 ## Talking to the engine
 
-Start it (`musickit-engine --api 20025`), then use `https://127.0.0.1:20025/api/v1/...`. The certificate is self-signed and regenerated per run; trust it for that connection only. Requests must have a loopback `Host`; browser `Origin`, if present, must be loopback or `https://music.apple.com` (see [security.md](security.md)).
+Start it (`musickit-engine --api 20025`), then use `https://127.0.0.1:20025/api/v1/...`. The certificate is self-signed and regenerated per run; trust it for that connection only. Requests must have a loopback `Host`; browser `Origin`, if present, must be `https://music.apple.com` or a loopback origin on the engine's own port (`MUSICKIT_ALLOW_LOCAL_ORIGINS=1` widens that to any loopback port) (see [security.md](security.md)).
 
 Typical flow for a player:
 
@@ -28,7 +28,7 @@ curl -sk -X POST https://127.0.0.1:20025/api/v1/playback \
 
 ### JavaScript
 
-`examples/http/client.mjs` (Node 20+) reads status and capabilities and tails the event stream. In a browser, call from a page served from a loopback origin.
+`examples/http/client.mjs` (Node 20+) reads status and capabilities and tails the event stream. In a browser, call from a page served by the engine's own port, or set `MUSICKIT_ALLOW_LOCAL_ORIGINS=1` for a dev server on another loopback port.
 
 ### Server-Sent Events
 

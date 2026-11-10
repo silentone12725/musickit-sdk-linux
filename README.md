@@ -49,7 +49,7 @@ curl -sk https://127.0.0.1:20025/api/v1/status
 curl -sk https://127.0.0.1:20025/api/v1/capabilities
 ```
 
-The engine only accepts requests whose `Host` is a loopback address and whose browser `Origin`, if any, is loopback or `https://music.apple.com`. See [docs/security.md](docs/security.md).
+The engine only accepts requests whose `Host` is a loopback address and whose browser `Origin`, if any, is `https://music.apple.com` or a loopback origin on the engine's own port (`MUSICKIT_ALLOW_LOCAL_ORIGINS=1` allows any loopback port). See [docs/security.md](docs/security.md).
 
 ## Documentation
 

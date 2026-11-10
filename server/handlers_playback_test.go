@@ -8,7 +8,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/silentone12725/musickit-sdk-linux/sdk/media"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/pipeline"
+	"github.com/silentone12725/musickit-sdk-linux/sdk/playback"
 )
 
 // The session-open circuit breaker fails EVERY subsequent open (songs included)
@@ -151,139 +156,95 @@ func TestContentFailuresDoNotAccumulate(t *testing.T) {
 	}
 }
 
-// ── proxyProgressiveVideo ─────────────────────────────────────────────────────
-
-// fakeCDN starts a test HTTP server simulating the Apple CDN (mvod).
-// It asserts that the expected Range header was received and replies with
-// the given status code + body.
-func fakeCDN(t *testing.T, wantRange string, status int, body string, extraHdrs map[string]string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := r.Header.Get("Range")
-		if got != wantRange {
-			t.Errorf("CDN Range header: got %q want %q", got, wantRange)
-		}
-		for k, v := range extraHdrs {
-			w.Header().Set(k, v)
-		}
-		w.WriteHeader(status)
-		io.WriteString(w, body) //nolint:errcheck
-	}))
+type mvAudioTestProvider struct {
+	stream func(io.Writer) error
 }
 
-func TestProxyProgressiveVideo_ForwardsRange(t *testing.T) {
-	cdn := fakeCDN(t, "bytes=100-200", http.StatusPartialContent, "partial-data",
-		map[string]string{
-			"Content-Type":  "video/mp4",
-			"Content-Range": "bytes 100-200/5000",
+func (p mvAudioTestProvider) Open(context.Context, media.OpenRequest) (*media.Session, error) {
+	return &media.Session{Kind: "mv", Tracks: []media.Track{{
+		Kind: pipeline.KindAudio, Codec: pipeline.CodecAAC,
+		Open: func(context.Context) (*pipeline.Stream, error) {
+			return &pipeline.Stream{Kind: pipeline.KindAudio, Source: mvAudioTestSource(p.stream)}, nil
+		},
+	}}}, nil
+}
+
+type mvAudioTestSource func(io.Writer) error
+
+func (f mvAudioTestSource) Stream(_ context.Context, w io.Writer) error { return f(w) }
+
+func TestMVAudioStreamDefersHeadersUntilFirstByte(t *testing.T) {
+	streamErr := errors.New("upstream failed")
+	for _, tc := range []struct {
+		name       string
+		stream     func(io.Writer) error
+		wantStatus int
+		wantBody   string
+		wantType   string
+	}{
+		{"failure before bytes", func(io.Writer) error { return streamErr }, http.StatusBadGateway, `"error":"upstream failed"`, "application/json"},
+		{"successful stream", func(w io.Writer) error { _, err := io.WriteString(w, "audio"); return err }, http.StatusOK, "audio", "audio/mp4"},
+		{"failure after bytes", func(w io.Writer) error { _, _ = io.WriteString(w, "partial"); return streamErr }, http.StatusOK, "partial", "audio/mp4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &APIServer{pm: playback.NewWithProvider(mvAudioTestProvider{stream: tc.stream})}
+			sess, err := s.pm.Open(context.Background(), playback.OpenRequest{AssetID: "mv-test", Video: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.pm.Release(sess.ID)
+			r := httptest.NewRequest(http.MethodGet, "/audio", nil)
+			r.SetPathValue("id", sess.ID)
+			w := httptest.NewRecorder()
+			s.handlePlaybackAudio(w, r)
+			if w.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d; body=%q", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if got := w.Header().Get("Content-Type"); got != tc.wantType {
+				t.Errorf("Content-Type = %q, want %q", got, tc.wantType)
+			}
+			if got := w.Body.String(); tc.wantStatus == http.StatusOK && got != tc.wantBody || tc.wantStatus != http.StatusOK && !strings.Contains(got, tc.wantBody) {
+				t.Errorf("body = %q, want %q", got, tc.wantBody)
+			}
 		})
-	defer cdn.Close()
-
-	s := &APIServer{}
-	req := httptest.NewRequest(http.MethodGet, "/video-dl", nil)
-	req.Header.Set("Range", "bytes=100-200")
-	rr := httptest.NewRecorder()
-
-	s.proxyProgressiveVideo(rr, req, cdn.URL)
-
-	if rr.Code != http.StatusPartialContent {
-		t.Errorf("status: got %d want %d", rr.Code, http.StatusPartialContent)
-	}
-	if rr.Body.String() != "partial-data" {
-		t.Errorf("body: got %q want %q", rr.Body.String(), "partial-data")
-	}
-	if v := rr.Header().Get("Content-Range"); v != "bytes 100-200/5000" {
-		t.Errorf("Content-Range: got %q", v)
-	}
-	if v := rr.Header().Get("Accept-Ranges"); v != "bytes" {
-		t.Errorf("Accept-Ranges: got %q want %q", v, "bytes")
 	}
 }
 
-func TestProxyProgressiveVideo_NoRangeHeader(t *testing.T) {
-	cdn := fakeCDN(t, "", http.StatusOK, "full-video", map[string]string{"Content-Type": "video/mp4"})
-	defer cdn.Close()
-
-	s := &APIServer{}
-	req := httptest.NewRequest(http.MethodGet, "/video-dl", nil) // no Range header
-	rr := httptest.NewRecorder()
-
-	s.proxyProgressiveVideo(rr, req, cdn.URL)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("status: got %d want %d", rr.Code, http.StatusOK)
+func TestCountingWriterCountsBytesActuallyWritten(t *testing.T) {
+	w := &countingWriter{w: &shortWriter{}}
+	if n, err := w.Write([]byte("audio")); n != 2 || err != nil {
+		t.Fatalf("Write = %d, %v; want 2, nil", n, err)
 	}
-	if rr.Body.String() != "full-video" {
-		t.Errorf("body: got %q want %q", rr.Body.String(), "full-video")
+	if w.n != 2 {
+		t.Fatalf("count = %d, want 2", w.n)
 	}
 }
 
-func TestProxyProgressiveVideo_FallbackContentType(t *testing.T) {
-	// CDN omits Content-Type (no body so Go's auto-detection doesn't fire).
-	// Engine must inject video/mp4.
-	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK) // no Write → no auto Content-Type
-	}))
-	defer cdn.Close()
+type shortWriter struct{}
 
-	s := &APIServer{}
-	req := httptest.NewRequest(http.MethodGet, "/video-dl", nil)
-	rr := httptest.NewRecorder()
+func (*shortWriter) Write([]byte) (int, error) { return 2, nil }
 
-	s.proxyProgressiveVideo(rr, req, cdn.URL)
-
-	if v := rr.Header().Get("Content-Type"); v != "video/mp4" {
-		t.Errorf("Content-Type fallback: got %q want %q", v, "video/mp4")
+func TestPlaybackTouchKeepsSessionAlive(t *testing.T) {
+	s := &APIServer{pm: playback.NewWithProvider(mvAudioTestProvider{stream: func(io.Writer) error { return nil }})}
+	sess, err := s.pm.Open(context.Background(), playback.OpenRequest{AssetID: "touch-test"})
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestProxyProgressiveVideo_AlwaysSetsAcceptRanges(t *testing.T) {
-	// CDN omits Accept-Ranges — engine must always advertise bytes.
-	cdn := fakeCDN(t, "", http.StatusOK, "data", map[string]string{"Content-Type": "video/mp4"})
-	defer cdn.Close()
-
-	s := &APIServer{}
-	req := httptest.NewRequest(http.MethodGet, "/video-dl", nil)
-	rr := httptest.NewRecorder()
-
-	s.proxyProgressiveVideo(rr, req, cdn.URL)
-
-	if v := rr.Header().Get("Accept-Ranges"); v != "bytes" {
-		t.Errorf("Accept-Ranges: got %q want %q", v, "bytes")
+	touch := func(id string) int {
+		r := httptest.NewRequest(http.MethodPost, "/touch", nil)
+		r.SetPathValue("id", id)
+		w := httptest.NewRecorder()
+		s.handlePlaybackTouch(w, r)
+		return w.Code
 	}
-}
-
-func TestProxyProgressiveVideo_CDNError(t *testing.T) {
-	cdn := fakeCDN(t, "", http.StatusForbidden, "access denied", map[string]string{"Content-Type": "text/plain"})
-	defer cdn.Close()
-
-	s := &APIServer{}
-	req := httptest.NewRequest(http.MethodGet, "/video-dl", nil)
-	rr := httptest.NewRecorder()
-
-	s.proxyProgressiveVideo(rr, req, cdn.URL)
-
-	// Engine must forward CDN error status verbatim.
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("status: got %d want %d (CDN error must be forwarded)", rr.Code, http.StatusForbidden)
+	if got := touch(sess.ID); got != http.StatusNoContent {
+		t.Fatalf("touch of a live session = %d, want 204", got)
 	}
-}
-
-func TestProxyProgressiveVideo_ClientDisconnect(t *testing.T) {
-	cdn := fakeCDN(t, "", http.StatusOK, "data", nil)
-	defer cdn.Close()
-
-	s := &APIServer{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled — simulates client disconnect
-
-	req := httptest.NewRequest(http.MethodGet, "/video-dl", nil).WithContext(ctx)
-	rr := httptest.NewRecorder()
-
-	// Must not write a 502 when the client disconnected.
-	s.proxyProgressiveVideo(rr, req, cdn.URL)
-	// 200 is httptest default (nothing written) — acceptable; 502 is NOT.
-	if rr.Code == http.StatusBadGateway {
-		t.Error("got 502 on client disconnect; expected silent return")
+	s.pm.Release(sess.ID)
+	if got := touch(sess.ID); got != http.StatusNotFound {
+		t.Fatalf("touch of a released session = %d, want 404 so the renderer reopens the track", got)
+	}
+	if got := touch("no-such-session"); got != http.StatusNotFound {
+		t.Fatalf("touch of an unknown session = %d, want 404", got)
 	}
 }
